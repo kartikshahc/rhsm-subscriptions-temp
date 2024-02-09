@@ -20,33 +20,41 @@
  */
 package org.candlepin.subscriptions.tally.billing.admin;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 import org.candlepin.subscriptions.billing.admin.api.model.MonthlyRemittance;
 import org.candlepin.subscriptions.db.BillableUsageRemittanceFilter;
 import org.candlepin.subscriptions.db.BillableUsageRemittanceRepository;
+import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntity;
 import org.candlepin.subscriptions.db.model.RemittanceSummaryProjection;
+import org.candlepin.subscriptions.json.BillableUsage;
+import org.candlepin.subscriptions.tally.billing.BillingProducer;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 @Slf4j
 @Component
 public class InternalBillingController {
   private final BillableUsageRemittanceRepository remittanceRepository;
+  private final BillingProducer billingProducer;
 
-  public InternalBillingController(BillableUsageRemittanceRepository remittanceRepository) {
+  public InternalBillingController(
+      BillableUsageRemittanceRepository remittanceRepository, BillingProducer billingProducer) {
     this.remittanceRepository = remittanceRepository;
+    this.billingProducer = billingProducer;
   }
 
-  public List<MonthlyRemittance> process(BillableUsageRemittanceFilter filter) {
-    if (filter.getAccount() == null && filter.getOrgId() == null) {
-      log.debug("Must provide either accountNumber or orgId in query");
+  public List<MonthlyRemittance> getRemittances(BillableUsageRemittanceFilter filter) {
+    if (filter.getOrgId() == null) {
+      log.debug("Must provide orgId in query");
       return Collections.emptyList();
     }
     MonthlyRemittance emptyRemittance =
         new MonthlyRemittance()
-            .accountNumber(filter.getAccount())
             .orgId(filter.getOrgId())
             .productId(filter.getProductId())
             .metricId(filter.getMetricId())
@@ -59,11 +67,39 @@ public class InternalBillingController {
       log.debug("This Account Remittance could not be found.");
       return List.of(emptyRemittance);
     }
-    log.debug(
-        "Found {} matches for Account Number: {}",
-        accountRemittanceList.size(),
-        filter.getAccount());
+    log.debug("Found {} matches for Org Id: {}", accountRemittanceList.size(), filter.getOrgId());
     return accountRemittanceList;
+  }
+
+  public long processRetries(OffsetDateTime asOf) {
+    List<BillableUsageRemittanceEntity> remittances =
+        remittanceRepository.findByRetryAfterLessThan(asOf);
+    for (BillableUsageRemittanceEntity remittance : remittances) {
+      // re-trigger billable usage
+      billingProducer.produce(toBillableUsage(remittance));
+      // reset the retry after column
+      remittance.setRetryAfter(null);
+    }
+
+    // to save the retry after column for all the entities
+    remittanceRepository.saveAll(remittances);
+    return remittances.size();
+  }
+
+  private BillableUsage toBillableUsage(BillableUsageRemittanceEntity remittance) {
+    return new BillableUsage()
+        .withOrgId(remittance.getKey().getOrgId())
+        .withId(remittance.getTallyId())
+        .withSnapshotDate(remittance.getKey().getRemittancePendingDate())
+        .withProductId(remittance.getKey().getProductId())
+        .withSla(BillableUsage.Sla.fromValue(remittance.getKey().getSla()))
+        .withUsage(BillableUsage.Usage.fromValue(remittance.getKey().getUsage()))
+        .withBillingProvider(
+            BillableUsage.BillingProvider.fromValue(remittance.getKey().getBillingProvider()))
+        .withBillingAccountId(remittance.getKey().getBillingAccountId())
+        .withUom(remittance.getKey().getMetricId())
+        .withValue(remittance.getRemittedPendingValue())
+        .withHardwareMeasurementType(remittance.getHardwareMeasurementType());
   }
 
   private List<MonthlyRemittance> transformUsageToMonthlyRemittance(
@@ -76,7 +112,6 @@ public class InternalBillingController {
     for (RemittanceSummaryProjection entity : remittanceSummaryProjections) {
       MonthlyRemittance accountRemittance =
           new MonthlyRemittance()
-              .accountNumber(entity.getAccountNumber())
               .orgId(entity.getOrgId())
               .productId(entity.getProductId())
               .metricId(entity.getMetricId())
@@ -89,5 +124,11 @@ public class InternalBillingController {
     }
     log.debug("Found {} remittances for this account", remittances.size());
     return remittances;
+  }
+
+  @Transactional
+  public int resetBillableUsageRemittance(
+      String productId, OffsetDateTime start, OffsetDateTime end, Set<String> orgIds) {
+    return remittanceRepository.resetBillableUsageRemittance(productId, start, end, orgIds);
   }
 }

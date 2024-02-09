@@ -20,37 +20,61 @@
  */
 package org.candlepin.subscriptions.event;
 
-import jakarta.persistence.EntityNotFoundException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
 import jakarta.transaction.Transactional;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.candlepin.subscriptions.db.EventRecordRepository;
 import org.candlepin.subscriptions.db.model.EventKey;
 import org.candlepin.subscriptions.db.model.EventRecord;
-import org.candlepin.subscriptions.db.model.EventRecordConverter;
+import org.candlepin.subscriptions.db.model.config.OptInType;
+import org.candlepin.subscriptions.json.BaseEvent;
+import org.candlepin.subscriptions.json.CleanUpEvent;
 import org.candlepin.subscriptions.json.Event;
+import org.candlepin.subscriptions.json.Event.BillingProvider;
+import org.candlepin.subscriptions.security.OptInController;
+import org.candlepin.subscriptions.util.TransactionHandler;
+import org.springframework.kafka.listener.BatchListenerFailedException;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 /** Encapsulates interaction with event store. */
 @Service
 @Slf4j
 public class EventController {
-  private final EventRecordRepository repo;
-  private final EventRecordConverter eventRecordConverter;
 
-  public EventController(EventRecordRepository repo, EventRecordConverter eventRecordConverter) {
+  private static final Set<String> EXCLUDE_LOG_FOR_EVENT_SOURCES =
+      Set.of("prometheus", "rhelemeter");
+  private final EventRecordRepository repo;
+  private final ObjectMapper objectMapper;
+  private final OptInController optInController;
+  private final TransactionHandler transactionHandler;
+
+  public EventController(
+      EventRecordRepository repo,
+      ObjectMapper objectMapper,
+      OptInController optInController,
+      TransactionHandler transactionHandler) {
     this.repo = repo;
-    this.eventRecordConverter = eventRecordConverter;
+    this.objectMapper = objectMapper;
+    this.optInController = optInController;
+    this.transactionHandler = transactionHandler;
   }
 
   /**
@@ -69,34 +93,20 @@ public class EventController {
   }
 
   public Stream<Event> fetchEventsInTimeRangeByServiceType(
-      String orgId, String serviceType, OffsetDateTime begin, OffsetDateTime end) {
+      String orgId,
+      String serviceType,
+      OffsetDateTime begin,
+      OffsetDateTime end,
+      OffsetDateTime asOfDateTime) {
+    // asOfDateTime is used to ignore events that are recorded outside a given hourly tally's
+    // window. Those events will be processed during the next hourly tally, and filtering them out
+    // here ensures they won't be processed twice hence we don't have to retally again.
     return repo.findByOrgIdAndServiceTypeAndTimestampGreaterThanEqualAndTimestampLessThanOrderByTimestamp(
             orgId, serviceType, begin, end)
+        .filter(
+            eventRecord ->
+                Objects.isNull(asOfDateTime) || eventRecord.getRecordDate().isBefore(asOfDateTime))
         .map(EventRecord::getEvent);
-  }
-
-  @SuppressWarnings({"linelength", "indentation"})
-  public Map<EventKey, Event> mapEventsInTimeRange(
-      String orgId,
-      String eventSource,
-      String eventType,
-      OffsetDateTime begin,
-      OffsetDateTime end) {
-    return repo.findEventRecordsByCriteria(orgId, eventSource, eventType, begin, end)
-        .map(EventRecord::getEvent)
-        .collect(Collectors.toMap(EventKey::fromEvent, Function.identity()));
-  }
-
-  /**
-   * Validates and saves event JSON in the DB.
-   *
-   * @param event the event to save
-   * @return the event ID
-   */
-  @Transactional
-  public Event saveEvent(Event event) {
-    EventRecord eventRecord = new EventRecord(event);
-    return repo.save(eventRecord).getEvent();
   }
 
   /**
@@ -104,65 +114,208 @@ public class EventController {
    *
    * @param events the event JSON objects to save.
    */
-  @Transactional
   public List<Event> saveAll(Collection<Event> events) {
-    return repo.saveAll(events.stream().map(EventRecord::new).collect(Collectors.toList())).stream()
+    return repo.saveAll(events.stream().map(EventRecord::new).toList()).stream()
         .map(EventRecord::getEvent)
-        .collect(Collectors.toList());
+        .toList();
   }
 
   /**
-   * Fetch a single Event by its ID.
+   * Validates and saves an event JSON object in the DB.
    *
-   * @param eventId Event id as a UUID
-   * @return Event if present, otherwise Optional.empty()
+   * @param event the event JSON object to save.
    */
-  @Transactional
-  public Optional<Event> getEvent(UUID eventId) {
-    try {
-      return Optional.of(repo.getOne(eventId).getEvent());
-    } catch (EntityNotFoundException e) {
-      return Optional.empty();
-    }
-  }
-
-  @Transactional
-  public void deleteEvents(Collection<Event> toDelete) {
-    repo.deleteInBatch(toDelete.stream().map(EventRecord::new).collect(Collectors.toList()));
+  public Event save(Event event) {
+    var result = repo.save(new EventRecord(event));
+    return result.getEvent();
   }
 
   @Transactional
   public void deleteEvent(UUID eventId) {
-    repo.deleteById(eventId);
+    repo.deleteByEventId(eventId);
   }
 
   @Transactional
-  public boolean hasEventsInTimeRange(
+  public Optional<OffsetDateTime> findFirstEventTimestampInRange(
       String orgId, String serviceType, OffsetDateTime startDate, OffsetDateTime endDate) {
-    return repo.existsByOrgIdAndServiceTypeAndTimestampGreaterThanEqualAndTimestampLessThan(
-        orgId, serviceType, startDate, endDate);
+    return Optional.ofNullable(
+            repo.findFirstEventTimestampInRange(orgId, serviceType, startDate, endDate))
+        .map(dateTime -> dateTime.atOffset(ZoneOffset.UTC));
   }
 
-  @Transactional
-  public void persistServiceInstances(Set<String> eventJsonList) {
-    Map<EventKey, Event> eventsMap = parseEventRecordsToEventsEntityMap(eventJsonList);
-    saveAll(eventsMap.values());
-  }
+  /**
+   * Parses json list into event objects to be persisted into database. Saves events in a new
+   * transaction so that exceptions can be caught, and we can re-attempt to save. If saveAll() fails
+   * on events then we try one by one so that we know where to retry and the records that can be
+   * saved are persisted. Throws BatchListenerFailedException which tells kafka to Retry or put
+   * record on dead letter topic.
+   * https://docs.spring.io/spring-kafka/docs/latest-ga/reference/html/#recovering-batch-eh
+   *
+   * @param eventJsonList
+   * @throws BatchListenerFailedException tells kafka where in batch to retry or send failed record
+   *     to dead letter topic. The index field of the exception is where kafka will retry.
+   */
+  public void persistServiceInstances(List<String> eventJsonList)
+      throws BatchListenerFailedException {
 
-  private Map<EventKey, Event> parseEventRecordsToEventsEntityMap(Set<String> eventJsonList) {
-    Map<EventKey, Event> eventsMap = new HashMap<>();
-    eventJsonList.forEach(
-        eventJson -> {
-          try {
-            Event event = eventRecordConverter.convertToEntityAttribute(eventJson);
-            eventsMap.putIfAbsent(EventKey.fromEvent(event), event);
-          } catch (Exception e) {
-            log.warn(
-                String.format(
-                    "Issue found %s for the service instance json skipping to next ",
-                    e.getCause()));
-          }
+    ServiceInstancesResult result = parseServiceInstancesResult(eventJsonList);
+
+    try {
+      if (!result.eventsMap.isEmpty()) {
+        int updated =
+            transactionHandler
+                .runInNewTransaction(
+                    () -> saveAll(result.eventsMap.values().stream().map(Pair::getKey).toList()))
+                .size();
+        log.debug("Adding/Updating {} metric events", updated);
+      }
+    } catch (Exception saveAllException) {
+      log.warn("Failed to save events. Retrying individually {} events.", result.eventsMap.size());
+      result
+          .eventsMap
+          .values()
+          .forEach(
+              eventIndexPair -> {
+                try {
+                  transactionHandler.runInNewTransaction(() -> save(eventIndexPair.getKey()));
+                } catch (Exception individualSaveException) {
+                  log.warn(
+                      "Failed to save individual event record: {} with error {}.",
+                      eventIndexPair.getKey(),
+                      ExceptionUtils.getStackTrace(individualSaveException));
+                  throw new BatchListenerFailedException(
+                      individualSaveException.getMessage(), eventIndexPair.getValue());
+                }
+              });
+    }
+
+    result.cleanUpEvents.forEach(
+        cleanUpEvent -> {
+          int deleted =
+              transactionHandler.runInNewTransaction(
+                  () ->
+                      repo.deleteStaleEvents(
+                          cleanUpEvent.getOrgId(),
+                          cleanUpEvent.getEventSource(),
+                          cleanUpEvent.getEventType(),
+                          cleanUpEvent.getMeteringBatchId(),
+                          cleanUpEvent.getStart(),
+                          cleanUpEvent.getEnd()));
+          log.info(
+              "Deleting {} stale metric events for orgId={} and {} metrics",
+              deleted,
+              cleanUpEvent.getOrgId(),
+              cleanUpEvent.getEventType());
         });
-    return eventsMap;
+
+    if (result
+        .failedOnIndex
+        .map(index -> index.compareTo(eventJsonList.size() - 1) < 0)
+        .orElse(false)) {
+      // We want to skip retrying the failed json parsing event so set index to plus 1.
+      throw new BatchListenerFailedException(
+          "Failed to parse event json. Skipping to next index in batch.",
+          result.failedOnIndex.get() + 1);
+    }
+  }
+
+  private ServiceInstancesResult parseServiceInstancesResult(List<String> eventJsonList) {
+    ServiceInstancesResult result = new ServiceInstancesResult();
+    LinkedHashMap<String, Integer> eventIndexMap = mapEventsToBatchIndex(eventJsonList);
+    for (Entry<String, Integer> eventIndex : eventIndexMap.entrySet()) {
+      try {
+        BaseEvent baseEvent = objectMapper.readValue(eventIndex.getKey(), BaseEvent.class);
+        if (!EXCLUDE_LOG_FOR_EVENT_SOURCES.contains(baseEvent.getEventSource())) {
+          log.info("Event processing in batch: " + eventIndex.getKey());
+        }
+        if (StringUtils.hasText(baseEvent.getOrgId())) {
+          log.debug(
+              "Ensuring orgId={} has been set up for syncing/reporting.", baseEvent.getOrgId());
+          ensureOptIn(baseEvent.getOrgId());
+        }
+
+        if (baseEvent instanceof Event eventToSave) {
+          if (BillingProvider.AZURE.equals(eventToSave.getBillingProvider())) {
+            setAzureBillingAccountId(eventToSave);
+          }
+          enrichServiceInstanceFromIncomingFeed(eventToSave);
+          result.addEvent(eventToSave, eventIndex.getValue());
+        } else if (baseEvent instanceof CleanUpEvent cleanUpEvent) {
+          log.debug("Processing clean up event for: " + cleanUpEvent);
+          result.addCleanUpEvent(cleanUpEvent);
+        }
+
+      } catch (Exception e) {
+        log.warn(
+            "Issue found {} for the service instance json {} skipping to next: {}",
+            e.getMessage(),
+            eventIndex.getKey(),
+            ExceptionUtils.getStackTrace(e));
+        if (result.failedOnIndex.isEmpty()) {
+          result.setFailedOnIndex(eventIndex.getValue());
+        }
+        break;
+      }
+    }
+    return result;
+  }
+
+  private void setAzureBillingAccountId(Event event) {
+    if (event.getAzureTenantId().isPresent() && event.getAzureSubscriptionId().isPresent()) {
+      String billingAccountId =
+          String.format(
+              "%s;%s", event.getAzureTenantId().get(), event.getAzureSubscriptionId().get());
+      event.setBillingAccountId(Optional.of(billingAccountId));
+    }
+  }
+
+  private void enrichServiceInstanceFromIncomingFeed(Event event) {
+    // Determine whether the product is payg or non-payg, and then add the appropriate tag in
+    // SWATCH-1993. We are only checking for payg at this time because we only support payg in this
+    // flow, and we don't have a way to distinguish between payg and non-payg through events.
+    String role = Optional.ofNullable(event.getRole()).map(Object::toString).orElse(null);
+    event.setProductTag(
+        SubscriptionDefinition.getAllProductTagsWithPaygEligibleByRoleOrEngIds(
+            role, event.getProductIds()));
+  }
+
+  /**
+   * Deduplicate eventJsonList while preserving indexes of events in batch Returns a map ordered by
+   * the event record index.
+   *
+   * @param eventJsonList
+   */
+  private LinkedHashMap<String, Integer> mapEventsToBatchIndex(List<String> eventJsonList) {
+    var result = new LinkedHashMap<String, Integer>();
+    for (int index = 0; index < eventJsonList.size(); index++) {
+      result.putIfAbsent(eventJsonList.get(index), index);
+    }
+    return result;
+  }
+
+  private void ensureOptIn(String orgId) {
+    try {
+      optInController.optInByOrgId(orgId, OptInType.PROMETHEUS);
+    } catch (Exception e) {
+      log.error("Error while attempting to automatically opt-in for orgId={} ", orgId, e);
+    }
+  }
+
+  private static class ServiceInstancesResult {
+    private final Map<EventKey, Pair<Event, Integer>> eventsMap = new HashMap<>();
+    private Optional<Integer> failedOnIndex = Optional.empty();
+    private final Set<CleanUpEvent> cleanUpEvents = new HashSet<>();
+
+    private void addEvent(Event event, int index) {
+      eventsMap.putIfAbsent(EventKey.fromEvent(event), Pair.of(event, index));
+    }
+
+    public void addCleanUpEvent(CleanUpEvent cleanUpEvent) {
+      cleanUpEvents.add(cleanUpEvent);
+    }
+
+    public void setFailedOnIndex(int index) {
+      this.failedOnIndex = Optional.of(index);
+    }
   }
 }

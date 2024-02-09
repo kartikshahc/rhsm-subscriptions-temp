@@ -42,6 +42,8 @@ public class InventoryHostFacts {
   private String systemProfileInfrastructureType;
   private Integer systemProfileCoresPerSocket;
   private Integer systemProfileSockets;
+  private Integer systemProfileCpus;
+  private Integer systemProfileThreadsPerCore;
   private String systemProfileArch;
   private boolean isMarketplace;
   private boolean isVirtual;
@@ -54,7 +56,6 @@ public class InventoryHostFacts {
   private String subscriptionManagerId;
   private String insightsId;
   private Set<String> qpcProducts;
-  private Set<String> qpcProductIds;
   private Set<String> systemProfileProductIds;
   private String syspurposeRole;
   private String syspurposeSla;
@@ -85,10 +86,11 @@ public class InventoryHostFacts {
       String systemProfileInfrastructureType,
       String systemProfileCores,
       String systemProfileSockets,
+      String systemProfileCpus,
+      String systemProfileThreadsPerCore,
       String systemProfileArch,
       String isMarketplace,
       String qpcProducts,
-      String qpcProductIds,
       String systemProfileProductIds,
       String syspurposeRole,
       String syspurposeSla,
@@ -114,11 +116,12 @@ public class InventoryHostFacts {
     this.orgId = orgId;
     this.products = asStringSet(products);
     this.qpcProducts = asStringSet(qpcProducts);
-    this.qpcProductIds = asStringSet(qpcProductIds);
     this.syncTimestamp = StringUtils.hasText(syncTimestamp) ? syncTimestamp : "";
     this.systemProfileInfrastructureType = systemProfileInfrastructureType;
     this.systemProfileCoresPerSocket = asInt(systemProfileCores);
     this.systemProfileSockets = asInt(systemProfileSockets);
+    this.systemProfileCpus = asInt(systemProfileCpus);
+    this.systemProfileThreadsPerCore = asInt(systemProfileThreadsPerCore);
     this.systemProfileArch = systemProfileArch;
     this.isMarketplace = asBoolean(isMarketplace);
     this.systemProfileProductIds = asStringSet(systemProfileProductIds);
@@ -174,10 +177,6 @@ public class InventoryHostFacts {
 
   public void setQpcProducts(String qpcProducts) {
     this.qpcProducts = asStringSet(qpcProducts);
-  }
-
-  public void setQpcProductIds(String qpcProductIds) {
-    this.qpcProductIds = asStringSet(qpcProductIds);
   }
 
   public void setSystemProfileProductIds(String productIds) {

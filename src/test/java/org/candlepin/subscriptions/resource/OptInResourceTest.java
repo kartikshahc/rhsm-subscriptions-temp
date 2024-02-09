@@ -24,12 +24,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import jakarta.ws.rs.BadRequestException;
-import org.candlepin.subscriptions.db.AccountConfigRepository;
+import org.candlepin.subscriptions.db.OrgConfigRepository;
 import org.candlepin.subscriptions.db.model.config.OptInType;
 import org.candlepin.subscriptions.security.OptInController;
 import org.candlepin.subscriptions.security.WithMockRedHatPrincipal;
 import org.candlepin.subscriptions.test.TestClockConfiguration;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -46,9 +45,7 @@ import org.springframework.test.context.ActiveProfiles;
 @Import(TestClockConfiguration.class)
 class OptInResourceTest {
 
-  @Autowired private ApplicationClock clock;
-
-  @MockBean AccountConfigRepository accountConfigRepository;
+  @MockBean OrgConfigRepository orgConfigRepository;
 
   @MockBean private OptInController controller;
 
@@ -56,7 +53,7 @@ class OptInResourceTest {
 
   @BeforeEach
   public void setupTests() {
-    when(accountConfigRepository.existsByOrgId("owner123456")).thenReturn(true);
+    when(orgConfigRepository.existsByOrgId("owner123456")).thenReturn(true);
   }
 
   @Test
@@ -68,13 +65,13 @@ class OptInResourceTest {
   @Test
   void testGet() {
     resource.getOptInConfig();
-    Mockito.verify(controller).getOptInConfig("account123456", "owner123456");
+    Mockito.verify(controller).getOptInConfig("owner123456");
   }
 
   @Test
   void testPut() {
     resource.putOptInConfig();
-    Mockito.verify(controller).optIn("account123456", "owner123456", OptInType.API);
+    Mockito.verify(controller).optIn("owner123456", OptInType.API);
   }
 
   @Test

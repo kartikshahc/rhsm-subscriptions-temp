@@ -22,16 +22,27 @@ package org.candlepin.subscriptions.security;
 
 import org.slf4j.Marker;
 import org.slf4j.MarkerFactory;
+import org.springframework.boot.autoconfigure.AutoConfigurationExcludeFilter;
+import org.springframework.boot.context.TypeExcludeFilter;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity;
+import org.springframework.context.annotation.FilterType;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 
 /** Holder class for security configurations */
 @Configuration
 @EnableWebSecurity
-@EnableGlobalMethodSecurity(prePostEnabled = true)
-@ComponentScan("org.candlepin.subscriptions.security")
+@EnableMethodSecurity
+@ComponentScan(
+    basePackages = "org.candlepin.subscriptions.security",
+    // Prevent TestConfiguration annotated classes from being picked up by ComponentScan
+    excludeFilters = {
+      @ComponentScan.Filter(type = FilterType.CUSTOM, classes = TypeExcludeFilter.class),
+      @ComponentScan.Filter(
+          type = FilterType.CUSTOM,
+          classes = AutoConfigurationExcludeFilter.class)
+    })
 public class SecurityConfiguration {
   public static final Marker SECURITY_STACKTRACE = MarkerFactory.getMarker("SECURITY_STACKTRACE");
 

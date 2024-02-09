@@ -4,6 +4,7 @@ plugins {
     id "java"
     id "com.diffplug.spotless"
     id 'com.adarshr.test-logger'
+    id 'jacoco'
 }
 
 repositories {
@@ -48,7 +49,17 @@ compileTestJava {
 }
 
 test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        String iTags = System.getProperty("includeTags")
+        if (iTags != null) {
+            includeTags(iTags)
+        }
+
+        String eTags = System.getProperty("excludeTags")
+        if (eTags != null) {
+            excludeTags(eTags)
+        }
+    }
     if (System.getenv("DOCKER_HOST") == null) {
         String UID = 'id -u'.execute().text.strip()
         environment "DOCKER_HOST", "unix:///run/user/$UID/podman/podman.sock"
@@ -62,4 +73,10 @@ test {
 tasks.withType(Jar).configureEach {
     // Here to address https://youtrack.jetbrains.com/issue/IDEA-305759
     duplicatesStrategy = DuplicatesStrategy.WARN
+}
+
+jacocoTestReport {
+    reports {
+        xml.required = false
+    }
 }

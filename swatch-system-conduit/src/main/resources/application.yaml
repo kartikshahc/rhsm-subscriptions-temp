@@ -31,15 +31,10 @@ rhsm-conduit:
     api-key: ${INVENTORY_API_KEY:changeit}
     host-last-sync-threshold: ${HOST_LAST_SYNC_THRESHOLD:24h}
     add-uuid-hyphens: ${INVENTORY_ADD_UUID_HYPHENS:false}
-    # FIXME: misnamed, it's actually in hours
-    stale-host-offset-in-days: ${INVENTORY_STALE_HOST_OFFSET_HOURS:48}
+    stale-host-offset: ${INVENTORY_STALE_HOST_OFFSET:48h}
     kafka-host-ingress-topic: ${INVENTORY_HOST_INGRESS_TOPIC}
-    tolerate-missing-account-number: ${TOLERATE_MISSING_ACCOUNT_NUMBER:false}
   tasks:
     topic: ${CONDUIT_TOPIC}
     kafka-group-id: ${CONDUIT_KAFKA_GROUP_ID:rhsm-conduit-task-processor}
     seek-override-end: ${KAFKA_SEEK_OVERRIDE_END:false}
     seek-override-timestamp: ${KAFKA_SEEK_OVERRIDE_TIMESTAMP:}
-  package_uri_mappings:
-    # this mapping required here because it is used by our SecurityConfig, which is shared
-    org.candlepin.subscriptions.conduit.resteasy: ${PATH_PREFIX}/${APP_NAME}/v1

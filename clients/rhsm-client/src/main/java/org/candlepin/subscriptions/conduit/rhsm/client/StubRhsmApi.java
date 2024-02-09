@@ -49,7 +49,6 @@ public class StubRhsmApi extends RhsmApi {
     Consumer consumer1 = new Consumer();
     consumer1.setUuid(UUID.randomUUID().toString());
     consumer1.setOrgId(xRhsmApiAccountID);
-    consumer1.setAccountNumber("ACCOUNT_1");
     consumer1.setHypervisorName("hypervisor1.test.com");
     consumer1.setServiceLevel("Premium");
     consumer1.setReleaseVer("8.0");
@@ -68,6 +67,9 @@ public class StubRhsmApi extends RhsmApi {
     consumer1.getFacts().put("Mac-addresses", "00:00:00:00:00:00, ff:ff:ff:ff:ff:ff");
     consumer1.getFacts().put("cpu.cpu_socket(s)", "2");
     consumer1.getFacts().put("cpu.core(s)_per_socket", "2");
+    consumer1.getFacts().put("cpu.cpu(s)", "3");
+    consumer1.getFacts().put("cpu.thread(s)_per_core", "5");
+    consumer1.getFacts().put("aws_instance_id", "123456");
 
     consumer1.getFacts().put("memory.memtotal", "32757812");
     consumer1.getFacts().put("uname.machine", "x86_64");
@@ -86,7 +88,6 @@ public class StubRhsmApi extends RhsmApi {
     String consumer2Uuid = UUID.randomUUID().toString();
     consumer2.setUuid(consumer2Uuid);
     consumer2.setOrgId(xRhsmApiAccountID);
-    consumer2.setAccountNumber("ACCOUNT_1");
     consumer2.getFacts().put("network.fqdn", "host2.test.com");
 
     Pagination pagination = new Pagination().offset(offset).limit(limit.longValue());
@@ -110,6 +111,7 @@ public class StubRhsmApi extends RhsmApi {
     }
     if (orgId.equals(GCP_ORG_ID)) {
       consumer.getFacts().remove("azure_offer");
+      consumer.getFacts().put("dmi.bios.vendor", "Google");
       consumer.getFacts().put("gcp_license_codes", "7883559014960410759");
     }
   }

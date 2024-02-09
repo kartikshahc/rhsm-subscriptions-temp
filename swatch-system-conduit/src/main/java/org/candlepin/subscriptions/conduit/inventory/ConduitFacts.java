@@ -50,12 +50,6 @@ public class ConduitFacts extends ConsumerInventory {
     return super.getFqdn();
   }
 
-  @Override
-  @NotNull
-  public String getAccountNumber() {
-    return super.getAccountNumber();
-  }
-
   @Valid
   @Override
   public List<@IpAddress @NotNull String> getIpAddresses() {
@@ -78,6 +72,18 @@ public class ConduitFacts extends ConsumerInventory {
   @Override
   public Integer getCpuCores() {
     return super.getCpuCores();
+  }
+
+  @Positive
+  @Override
+  public Integer getNumberOfCpus() {
+    return super.getNumberOfCpus();
+  }
+
+  @Positive
+  @Override
+  public Integer getThreadsPerCore() {
+    return super.getThreadsPerCore();
   }
 
   @Positive

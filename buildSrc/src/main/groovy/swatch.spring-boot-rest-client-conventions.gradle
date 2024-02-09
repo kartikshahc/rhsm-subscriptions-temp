@@ -44,8 +44,12 @@ openApiGenerate {
 dependencies {
     api project(':clients-core')
     api "jakarta.annotation:jakarta.annotation-api"
-    api "org.jboss.resteasy:resteasy-client"
-    api "org.jboss.resteasy:resteasy-multipart-provider"
+    api (libraries["resteasy-client"]) {
+        exclude group: "org.jboss", module: "jandex"
+    }
+    api (libraries["resteasy-multipart-provider"]) {
+        exclude group: "org.jboss", module: "jandex"
+    }
 
     api "com.fasterxml.jackson.core:jackson-annotations"
     api "com.fasterxml.jackson.core:jackson-databind"
@@ -53,13 +57,15 @@ dependencies {
 
     api "org.springframework:spring-context"
     api "org.slf4j:slf4j-api"
-    api "io.swagger:swagger-annotations"
+    api libraries["swagger-annotations"]
     api libraries["jsr305"]
     api libraries["jackson-databind-nullable"]
 
     compileOnly 'org.springframework.boot:spring-boot'
-    testImplementation libraries["wiremock-jre8"]
-    testImplementation "com.google.guava:guava"
+    testImplementation libraries["wiremock"]
+    testImplementation libraries["guava"]
+    // Necessary to test the serialization of JSON payloads
+    testImplementation libraries["resteasy-jackson2-provider"]
 }
 
 sourceSets.main.java.srcDirs += "${buildDir}/generated/src/main/java"

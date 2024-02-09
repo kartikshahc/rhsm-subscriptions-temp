@@ -26,14 +26,17 @@ import static org.mockito.Mockito.*;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Stream;
 import org.candlepin.subscriptions.conduit.inventory.ConduitFacts;
 import org.candlepin.subscriptions.conduit.inventory.InventoryServiceProperties;
 import org.candlepin.subscriptions.conduit.json.inventory.HbiFactSet;
+import org.candlepin.subscriptions.utilization.api.model.ConsumerInventory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -56,6 +59,10 @@ import org.springframework.test.context.ActiveProfiles;
 @ExtendWith(MockitoExtension.class)
 @ActiveProfiles({"rhsm-conduit", "test", "kafka-queue"})
 class KafkaEnabledInventoryServiceTest {
+
+  private static final int NUMBER_OF_CPUS = 5;
+  private static final int THREADS_PER_CORE = 3;
+
   @Autowired
   @Qualifier("kafkaRetryTemplate")
   private RetryTemplate retryTemplate;
@@ -84,12 +91,15 @@ class KafkaEnabledInventoryServiceTest {
 
     ConduitFacts expectedFacts = new ConduitFacts();
     expectedFacts.setFqdn("my_fqdn");
-    expectedFacts.setAccountNumber("my_account");
     expectedFacts.setOrgId("my_org");
     expectedFacts.setCpuCores(25);
     expectedFacts.setCpuSockets(45);
     expectedFacts.setOsName("Red Hat Enterprise Linux Workstation");
     expectedFacts.setOsVersion("6.3");
+    expectedFacts.setNumberOfCpus(NUMBER_OF_CPUS);
+    expectedFacts.setThreadsPerCore(THREADS_PER_CORE);
+    expectedFacts.setProviderType(ConsumerInventory.ProviderTypeEnum.AZURE);
+    expectedFacts.setProviderId(UUID.randomUUID().toString());
 
     InventoryServiceProperties props = new InventoryServiceProperties();
     props.setKafkaHostIngressTopic("placeholder");
@@ -102,7 +112,6 @@ class KafkaEnabledInventoryServiceTest {
     CreateUpdateHostMessage message = messageCaptor.getValue();
     assertNotNull(message);
     assertEquals("add_host", message.getOperation());
-    assertEquals(expectedFacts.getAccountNumber(), message.getData().getAccount());
     assertEquals(expectedFacts.getFqdn(), message.getData().getFqdn());
 
     assertNotNull(message.getData().getFacts());
@@ -122,12 +131,15 @@ class KafkaEnabledInventoryServiceTest {
         "RHEL", message.getData().getSystemProfile().getOperatingSystem().getName().value());
     assertEquals(6, message.getData().getSystemProfile().getOperatingSystem().getMajor());
     assertEquals(3, message.getData().getSystemProfile().getOperatingSystem().getMinor());
+    assertEquals(NUMBER_OF_CPUS, message.getData().getSystemProfile().getNumberOfCpus());
+    assertEquals(THREADS_PER_CORE, message.getData().getSystemProfile().getThreadsPerCore());
+    assertEquals(expectedFacts.getProviderId(), message.getData().getProviderId());
+    assertEquals(expectedFacts.getProviderType(), message.getData().getProviderType());
   }
 
   @Test
   void ensureSendHostRetries() {
     ConduitFacts conduitFacts = new ConduitFacts();
-    conduitFacts.setAccountNumber("my_account");
     List<ConduitFacts> expectedFacts = Arrays.asList(conduitFacts);
 
     when(producer.send(anyString(), any(CreateUpdateHostMessage.class)))
@@ -176,10 +188,9 @@ class KafkaEnabledInventoryServiceTest {
     when(producer.send(topicCaptor.capture(), messageCaptor.capture())).thenReturn(null);
 
     ConduitFacts expectedFacts = new ConduitFacts();
-    expectedFacts.setAccountNumber("my_account");
 
     InventoryServiceProperties props = new InventoryServiceProperties();
-    props.setStaleHostOffsetInDays(24);
+    props.setStaleHostOffset(Duration.ofHours(24));
 
     KafkaEnabledInventoryService service =
         new KafkaEnabledInventoryService(props, producer, meterRegistry, retryTemplate);
@@ -188,7 +199,6 @@ class KafkaEnabledInventoryServiceTest {
     CreateUpdateHostMessage message = messageCaptor.getValue();
     assertNotNull(message);
     assertEquals("add_host", message.getOperation());
-    assertEquals(expectedFacts.getAccountNumber(), message.getData().getAccount());
 
     assertNotNull(message.getData().getFacts());
     assertEquals(1, message.getData().getFacts().size());
@@ -213,7 +223,6 @@ class KafkaEnabledInventoryServiceTest {
 
     ConduitFacts expectedFacts = new ConduitFacts();
     expectedFacts.setFqdn("my_fqdn");
-    expectedFacts.setAccountNumber("my_account");
     expectedFacts.setOrgId("my_org");
     expectedFacts.setCpuCores(25);
     expectedFacts.setCpuSockets(45);
@@ -231,7 +240,6 @@ class KafkaEnabledInventoryServiceTest {
     CreateUpdateHostMessage message = messageCaptor.getValue();
     assertNotNull(message);
     assertEquals("add_host", message.getOperation());
-    assertEquals(expectedFacts.getAccountNumber(), message.getData().getAccount());
     assertEquals(expectedFacts.getFqdn(), message.getData().getFqdn());
 
     assertNotNull(message.getData().getFacts());
@@ -270,7 +278,6 @@ class KafkaEnabledInventoryServiceTest {
 
     ConduitFacts expectedFacts = new ConduitFacts();
     expectedFacts.setFqdn("my_fqdn");
-    expectedFacts.setAccountNumber("my_account");
     expectedFacts.setOrgId("my_org");
     expectedFacts.setCpuCores(25);
     expectedFacts.setCpuSockets(45);
@@ -288,7 +295,6 @@ class KafkaEnabledInventoryServiceTest {
     CreateUpdateHostMessage message = messageCaptor.getValue();
     assertNotNull(message);
     assertEquals("add_host", message.getOperation());
-    assertEquals(expectedFacts.getAccountNumber(), message.getData().getAccount());
     assertEquals(expectedFacts.getFqdn(), message.getData().getFqdn());
 
     assertNotNull(message.getData().getFacts());

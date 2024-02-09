@@ -26,6 +26,8 @@ import jakarta.persistence.ElementCollection;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
+import jakarta.persistence.NamedAttributeNode;
+import jakarta.persistence.NamedEntityGraph;
 import jakarta.persistence.Table;
 import java.io.Serializable;
 import java.util.HashSet;
@@ -54,6 +56,10 @@ import lombok.ToString;
 @Builder
 @AllArgsConstructor(access = AccessLevel.PRIVATE)
 @NoArgsConstructor
+// graph fetches all associations to avoid LazyInitializationException
+@NamedEntityGraph(
+    name = "graph.offering",
+    attributeNodes = {@NamedAttributeNode("childSkus"), @NamedAttributeNode("productIds")})
 public class Offering implements Serializable {
 
   /**
@@ -151,8 +157,15 @@ public class Offering implements Serializable {
   @Column(name = "derived_sku")
   private String derivedSku;
 
-  public Boolean getHasUnlimitedUsage() {
-    return hasUnlimitedUsage;
+  @Column(name = "metered")
+  private Boolean metered;
+
+  public boolean isMetered() {
+    return metered != null && metered;
+  }
+
+  public boolean isHasUnlimitedUsage() {
+    return hasUnlimitedUsage != null && hasUnlimitedUsage;
   }
 
   public List<String> getProductIdsAsStrings() {
@@ -180,7 +193,8 @@ public class Offering implements Serializable {
         && serviceLevel == offering.serviceLevel
         && usage == offering.usage
         && Objects.equals(hasUnlimitedUsage, offering.hasUnlimitedUsage)
-        && Objects.equals(derivedSku, offering.derivedSku);
+        && Objects.equals(derivedSku, offering.derivedSku)
+        && Objects.equals(metered, offering.metered);
   }
 
   @Override
@@ -198,6 +212,7 @@ public class Offering implements Serializable {
         serviceLevel,
         usage,
         hasUnlimitedUsage,
-        derivedSku);
+        derivedSku,
+        metered);
   }
 }

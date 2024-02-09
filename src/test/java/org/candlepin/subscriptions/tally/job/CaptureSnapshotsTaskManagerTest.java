@@ -29,9 +29,9 @@ import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.ApplicationProperties;
-import org.candlepin.subscriptions.db.AccountConfigRepository;
-import org.candlepin.subscriptions.db.AccountListSource;
+import org.candlepin.subscriptions.db.OrgConfigRepository;
 import org.candlepin.subscriptions.task.TaskDescriptor;
 import org.candlepin.subscriptions.task.TaskManagerException;
 import org.candlepin.subscriptions.task.TaskQueueProperties;
@@ -39,7 +39,6 @@ import org.candlepin.subscriptions.task.TaskType;
 import org.candlepin.subscriptions.task.queue.inmemory.ExecutorTaskQueue;
 import org.candlepin.subscriptions.task.queue.inmemory.ExecutorTaskQueueConsumerFactory;
 import org.candlepin.subscriptions.test.TestClockConfiguration;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.util.DateRange;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -61,15 +60,13 @@ class CaptureSnapshotsTaskManagerTest {
 
   @Autowired private CaptureSnapshotsTaskManager manager;
 
-  @MockBean private AccountListSource accountListSource;
-
   @Autowired private TaskQueueProperties taskQueueProperties;
 
   @Autowired private ApplicationProperties appProperties;
 
   @Autowired ApplicationClock applicationClock;
 
-  @MockBean private AccountConfigRepository accountRepo;
+  @MockBean private OrgConfigRepository orgRepo;
 
   public static final String ORG_ID = "org123";
   public static final String ACCOUNT = "foo123";
@@ -83,7 +80,7 @@ class CaptureSnapshotsTaskManagerTest {
   @Test
   void ensureUpdateIsRunForEachOrg() throws Exception {
     List<String> expectedOrgList = Arrays.asList("o1", "o2");
-    when(accountRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
+    when(orgRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
 
     manager.updateSnapshotsForAllOrg();
 
@@ -94,7 +91,7 @@ class CaptureSnapshotsTaskManagerTest {
   @Test
   void ensureOrgListIsPartitionedWhenSendingTaskMessages() throws Exception {
     List<String> expectedOrgList = Arrays.asList("o1", "o2", "o3", "o4");
-    when(accountRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
+    when(orgRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
 
     manager.updateSnapshotsForAllOrg();
 
@@ -108,7 +105,7 @@ class CaptureSnapshotsTaskManagerTest {
   @Test
   void ensureLastOrgListPartitionIsIncludedWhenSendingTaskMessages() throws Exception {
     List<String> expectedOrgList = Arrays.asList("o1", "o2", "o3", "o4", "o5");
-    when(accountRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
+    when(orgRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
 
     manager.updateSnapshotsForAllOrg();
 
@@ -123,7 +120,7 @@ class CaptureSnapshotsTaskManagerTest {
   @Test
   void ensureErrorOnUpdateContinuesWithoutFailure() throws Exception {
     List<String> expectedOrgList = Arrays.asList("o1", "o2", "o3", "o4", "o5", "o6");
-    when(accountRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
+    when(orgRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgList.stream());
 
     doThrow(new RuntimeException("Forced!"))
         .when(queue)
@@ -141,7 +138,7 @@ class CaptureSnapshotsTaskManagerTest {
 
   @Test
   void ensureNoUpdatesWhenOrgListCanNotBeRetreived() throws Exception {
-    doThrow(new RuntimeException()).when(accountRepo).findSyncEnabledOrgs();
+    doThrow(new RuntimeException()).when(orgRepo).findSyncEnabledOrgs();
 
     assertThrows(
         TaskManagerException.class,
@@ -162,7 +159,7 @@ class CaptureSnapshotsTaskManagerTest {
   @Test
   void testHourlySnapshotTallyOffset() {
     List<String> expectedOrgs = Arrays.asList("o1", "o2");
-    when(accountRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgs.stream());
+    when(orgRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgs.stream());
 
     Duration metricRange = appProperties.getMetricLookupRangeDuration();
     Duration prometheusLatencyDuration = appProperties.getPrometheusLatencyDuration();
@@ -181,7 +178,7 @@ class CaptureSnapshotsTaskManagerTest {
           verify(queue, times(1))
               .enqueue(
                   TaskDescriptor.builder(
-                          TaskType.UPDATE_HOURLY_SNAPSHOTS, taskQueueProperties.getTopic())
+                          TaskType.UPDATE_HOURLY_SNAPSHOTS, taskQueueProperties.getTopic(), null)
                       .setSingleValuedArg("orgId", orgId)
                       // 2019-05-24T12:35Z truncated to top of the hour - 1 hour tally range
                       .setSingleValuedArg("startDateTime", "2019-05-24T10:00:00Z")
@@ -193,7 +190,7 @@ class CaptureSnapshotsTaskManagerTest {
   @Test
   void testHourlySnapshotForAllAccountsForDateRange() throws Exception {
     List<String> expectedOrgs = Arrays.asList("o1", "o2");
-    when(accountRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgs.stream());
+    when(orgRepo.findSyncEnabledOrgs()).thenReturn(expectedOrgs.stream());
 
     DateRange range =
         new DateRange(applicationClock.now().minusDays(10L), applicationClock.now().minusDays(5L));
@@ -205,7 +202,7 @@ class CaptureSnapshotsTaskManagerTest {
           verify(queue, times(1))
               .enqueue(
                   TaskDescriptor.builder(
-                          TaskType.UPDATE_HOURLY_SNAPSHOTS, taskQueueProperties.getTopic())
+                          TaskType.UPDATE_HOURLY_SNAPSHOTS, taskQueueProperties.getTopic(), null)
                       .setSingleValuedArg("orgId", orgId)
                       // 10 days less than the test clock at the top of the hour.
                       .setSingleValuedArg("startDateTime", "2019-05-14T12:00:00Z")
@@ -220,7 +217,7 @@ class CaptureSnapshotsTaskManagerTest {
   }
 
   private TaskDescriptor createDescriptorAccount(List<String> accounts) {
-    return TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic())
+    return TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic(), null)
         .setArg("accounts", accounts)
         .build();
   }
@@ -230,7 +227,7 @@ class CaptureSnapshotsTaskManagerTest {
   }
 
   private TaskDescriptor createDescriptorOrg(List<String> orgs) {
-    return TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic())
+    return TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic(), null)
         .setArg("orgs", orgs)
         .build();
   }

@@ -20,11 +20,9 @@
  */
 package org.candlepin.subscriptions.tally.filler;
 
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.model.Granularity;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.util.SnapshotTimeAdjuster;
-import org.candlepin.subscriptions.utilization.api.model.TallyReportDataPoint;
-import org.candlepin.subscriptions.utilization.api.model.TallySnapshot;
 
 /** Responsible for creating ReportFiller objects based on granularity. */
 public class ReportFillerFactory {
@@ -35,29 +33,15 @@ public class ReportFillerFactory {
 
   /**
    * Creates an instance of a ReportFiller based on a Granularity, for filling in lists of
-   * TallySnapshot.
-   *
-   * @param clock an application clock instance to base dates off of.
-   * @param granularity the target granularity
-   * @return a ReportFiller instance for the specified granularity.
-   */
-  public static ReportFiller<TallySnapshot> getInstance(
-      ApplicationClock clock, Granularity granularity) {
-    SnapshotTimeAdjuster timeAdjuster = SnapshotTimeAdjuster.getTimeAdjuster(clock, granularity);
-    return new ReportFiller<>(timeAdjuster, new TallySnapshotAdapter(clock));
-  }
-
-  /**
-   * Creates an instance of a ReportFiller based on a Granularity, for filling in lists of
    * TallyReportDataPoint.
    *
    * @param clock an application clock instance to base dates off of.
    * @param granularity the target granularity
    * @return a ReportFiller instance for the specified granularity.
    */
-  public static ReportFiller<TallyReportDataPoint> getDataPointReportFiller(
+  public static ReportFiller<UnroundedTallyReportDataPoint> getDataPointReportFiller(
       ApplicationClock clock, Granularity granularity) {
     SnapshotTimeAdjuster timeAdjuster = SnapshotTimeAdjuster.getTimeAdjuster(clock, granularity);
-    return new ReportFiller<>(timeAdjuster, new TallyReportDataPointAdapter(clock));
+    return new ReportFiller<>(timeAdjuster, new UnroundedTallyReportDataPointAdapter(clock));
   }
 }

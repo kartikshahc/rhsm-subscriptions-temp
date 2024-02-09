@@ -21,17 +21,21 @@
 package org.candlepin.subscriptions.resource;
 
 import com.google.common.collect.ImmutableMap;
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.registry.ProductId;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
+import com.redhat.swatch.configuration.registry.Variant;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.UriInfo;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.function.Function;
+import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.candlepin.subscriptions.db.HostRepository;
@@ -43,9 +47,6 @@ import org.candlepin.subscriptions.db.model.InstanceMonthlyTotalKey;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.TallyInstanceView;
 import org.candlepin.subscriptions.db.model.Usage;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.resteasy.PageLinkCreator;
 import org.candlepin.subscriptions.security.auth.ReportingAccessRequired;
 import org.candlepin.subscriptions.utilization.api.model.BillingProviderType;
@@ -53,12 +54,9 @@ import org.candlepin.subscriptions.utilization.api.model.CloudProvider;
 import org.candlepin.subscriptions.utilization.api.model.InstanceData;
 import org.candlepin.subscriptions.utilization.api.model.InstanceGuestReport;
 import org.candlepin.subscriptions.utilization.api.model.InstanceMeta;
-import org.candlepin.subscriptions.utilization.api.model.InstanceReportSort;
 import org.candlepin.subscriptions.utilization.api.model.InstanceResponse;
 import org.candlepin.subscriptions.utilization.api.model.MetaCount;
-import org.candlepin.subscriptions.utilization.api.model.MetricId;
 import org.candlepin.subscriptions.utilization.api.model.PageLinks;
-import org.candlepin.subscriptions.utilization.api.model.ProductId;
 import org.candlepin.subscriptions.utilization.api.model.ReportCategory;
 import org.candlepin.subscriptions.utilization.api.model.ServiceLevelType;
 import org.candlepin.subscriptions.utilization.api.model.SortDirection;
@@ -75,24 +73,21 @@ import org.springframework.transaction.annotation.Transactional;
 @Slf4j
 public class InstancesResource implements InstancesApi {
 
-  private final TallyInstanceViewRepository repository;
-  private final HostRepository hostRepository;
-  private final PageLinkCreator pageLinkCreator;
-  private final TagProfile tagProfile;
-
-  public static final Map<InstanceReportSort, String> INSTANCE_SORT_PARAM_MAPPING =
-      ImmutableMap.<InstanceReportSort, String>builder()
-          .put(InstanceReportSort.DISPLAY_NAME, "displayName")
-          .put(InstanceReportSort.LAST_SEEN, "lastSeen")
-          .put(InstanceReportSort.BILLING_PROVIDER, "hostBillingProvider")
-          .put(InstanceReportSort.NUMBER_OF_GUESTS, "numOfGuests")
-          .put(InstanceReportSort.CATEGORY, "key.measurementType")
-          .putAll(getUomSorts())
-          .put(InstanceReportSort.SOCKETS, "sockets")
+  public static final Map<String, String> FIELD_SORT_PARAM_MAPPING =
+      ImmutableMap.<String, String>builder()
+          .put("display_name", "displayName")
+          .put("last_seen", "lastSeen")
+          .put("billing_provider", "hostBillingProvider")
+          .put("number_of_guests", "numOfGuests")
+          .put("category", "key.measurementType")
+          .put("Sockets", "sockets")
+          .put("Cores", "cores")
           .build();
 
-  public static final Map<InstanceReportSort, Measurement.Uom> SORT_TO_UOM_MAP =
-      ImmutableMap.copyOf(getSortToUomMap());
+  public static final Set<String> METRICS_TO_SORT =
+      MetricId.getAll().stream().map(MetricId::getValue).collect(Collectors.toUnmodifiableSet());
+  public static final String METRICS_SORT_PARAM = "value";
+  private static final Sort.Order IMPLICIT_ORDER_TO_SORT = Sort.Order.by("id");
 
   private static final Map<ReportCategory, List<HardwareMeasurementType>> CATEGORY_MAP =
       Map.of(
@@ -101,17 +96,19 @@ public class InstancesResource implements InstancesApi {
           ReportCategory.HYPERVISOR, List.of(HardwareMeasurementType.HYPERVISOR),
           ReportCategory.CLOUD, new ArrayList<>(HardwareMeasurementType.getCloudProviderTypes()));
 
+  private final TallyInstanceViewRepository repository;
+  private final HostRepository hostRepository;
+  private final PageLinkCreator pageLinkCreator;
+
   @Context UriInfo uriInfo;
 
   public InstancesResource(
       TallyInstanceViewRepository tallyInstanceViewRepository,
       HostRepository hostRepository,
-      PageLinkCreator pageLinkCreator,
-      TagProfile tagProfile) {
+      PageLinkCreator pageLinkCreator) {
     this.repository = tallyInstanceViewRepository;
     this.hostRepository = hostRepository;
     this.pageLinkCreator = pageLinkCreator;
-    this.tagProfile = tagProfile;
   }
 
   @Override
@@ -134,6 +131,7 @@ public class InstancesResource implements InstancesApi {
   }
 
   @Override
+  @ReportingAccessRequired
   @Transactional(readOnly = true)
   public InstanceResponse getInstancesByProduct(
       ProductId productId,
@@ -141,32 +139,36 @@ public class InstancesResource implements InstancesApi {
       Integer limit,
       ServiceLevelType sla,
       UsageType usage,
-      MetricId uom,
+      String uom,
       BillingProviderType billingProviderType,
       String billingAccountId,
       String displayNameContains,
       ReportCategory reportCategory,
       OffsetDateTime beginning,
       OffsetDateTime ending,
-      InstanceReportSort sort,
+      String sort,
       SortDirection dir) {
 
     String orgId = ResourceUtils.getOrgId();
 
     log.debug("Get instances api called for org_id: {} and product: {}", orgId, productId);
 
-    Sort.Direction dirValue = Sort.Direction.ASC;
-    if (dir == SortDirection.DESC) {
-      dirValue = Sort.Direction.DESC;
+    Optional<MetricId> metricIdOptional = Optional.empty();
+    if (Objects.nonNull(uom)) {
+      try {
+        metricIdOptional = Optional.of(MetricId.fromString(uom));
+      } catch (IllegalArgumentException ex) {
+        throw new BadRequestException(ex);
+      }
     }
-    Sort.Order implicitOrder = Sort.Order.by("id");
-    Sort sortValue = Sort.by(implicitOrder);
 
     int minCores = 0;
     int minSockets = 0;
-    if (uom == MetricId.CORES) {
+    if (metricIdOptional.map(metricId -> metricId.equals(MetricIdUtils.getCores())).orElse(false)) {
       minCores = 1;
-    } else if (uom == MetricId.SOCKETS) {
+    } else if (metricIdOptional
+        .map(metricId -> metricId.equals(MetricIdUtils.getSockets()))
+        .orElse(false)) {
       minSockets = 1;
     }
 
@@ -181,27 +183,31 @@ public class InstancesResource implements InstancesApi {
 
     List<InstanceData> payload;
     Page<TallyInstanceView> instances;
-    if (sort != null) {
-      Sort.Order userDefinedOrder = new Sort.Order(dirValue, INSTANCE_SORT_PARAM_MAPPING.get(sort));
-      sortValue = Sort.by(userDefinedOrder, implicitOrder);
-    }
-    Pageable page = ResourceUtils.getPageable(offset, limit, sortValue);
+
+    Pageable page = ResourceUtils.getPageable(offset, limit, toSort(sort, dir));
 
     OffsetDateTime now = OffsetDateTime.now();
     OffsetDateTime start = Optional.ofNullable(beginning).orElse(now);
     OffsetDateTime end = Optional.ofNullable(ending).orElse(now);
-    var uomSet = tagProfile.measurementsByTag(productId.toString());
-    List<String> measurements = uomSet.stream().map(Measurement.Uom::toString).sorted().toList();
+
+    var variant = Variant.findByTag(productId.toString());
+    var metricIdSet =
+        MetricIdUtils.getMetricIdsFromConfigForVariant(variant.orElse(null))
+            .collect(Collectors.toSet());
+    List<String> measurements = metricIdSet.stream().map(MetricId::toString).sorted().toList();
 
     validateBeginningAndEndingDates(productId, start, end);
 
-    boolean isPAYG = tagProfile.isProductPAYGEligible(productId.toString());
+    boolean isPAYG = isPayg(variant);
     String month = isPAYG ? InstanceMonthlyTotalKey.formatMonthId(start) : null;
-    // We depend on a "reference UOM" in order to filter out instances that were not active in
+    // We depend on a "reference MetricId" in order to filter out instances that were not active in
     // the selected month. This is also used for sorting purposes (same join). See
     // org.candlepin.subscriptions.db.TallyInstanceViewSpecification#toPredicate and
     // org.candlepin.subscriptions.db.TallyInstanceViewRepository#findAllBy.
-    Measurement.Uom referenceUom = getMeasurementUom(uom, sort);
+    MetricId referenceMetricId = metricIdOptional.orElse(null);
+    if (referenceMetricId == null && sort != null && METRICS_TO_SORT.contains(sort)) {
+      referenceMetricId = MetricId.fromString(sort);
+    }
 
     instances =
         repository.findAllBy(
@@ -213,7 +219,7 @@ public class InstancesResource implements InstancesApi {
             minCores,
             minSockets,
             month,
-            referenceUom,
+            referenceMetricId,
             sanitizedBillingProvider,
             sanitizedBillingAccountId,
             hardwareMeasurementTypes,
@@ -237,7 +243,7 @@ public class InstancesResource implements InstancesApi {
         .meta(
             new InstanceMeta()
                 .count((int) instances.getTotalElements())
-                .product(productId)
+                .product(productId.toString())
                 .serviceLevel(sla)
                 .usage(usage)
                 .billingProvider(billingProviderType)
@@ -246,11 +252,36 @@ public class InstancesResource implements InstancesApi {
         .data(payload);
   }
 
+  private static Sort toSort(String sort, SortDirection dir) {
+    Sort.Direction dirValue =
+        SortDirection.DESC.equals(dir) ? Sort.Direction.DESC : Sort.Direction.ASC;
+
+    Sort sortValue;
+
+    if (sort != null) {
+      String column =
+          METRICS_TO_SORT.contains(sort) ? METRICS_SORT_PARAM : FIELD_SORT_PARAM_MAPPING.get(sort);
+      Sort.Order userDefinedOrder = new Sort.Order(dirValue, column);
+      sortValue = Sort.by(userDefinedOrder, IMPLICIT_ORDER_TO_SORT);
+    } else {
+      sortValue = Sort.by(IMPLICIT_ORDER_TO_SORT);
+    }
+
+    return sortValue;
+  }
+
+  private static Boolean isPayg(Optional<Variant> variant) {
+    return variant
+        .map(Variant::getSubscription)
+        .map(SubscriptionDefinition::isPaygEligible)
+        .orElse(false);
+  }
+
   protected void validateBeginningAndEndingDates(
       ProductId productId, OffsetDateTime beginning, OffsetDateTime ending) {
     boolean isDateRangePossible = beginning.isBefore(ending) || beginning.isEqual(ending);
     boolean isBothDatesFromSameMonth = Objects.equals(beginning.getMonth(), ending.getMonth());
-    boolean isPAYG = tagProfile.isProductPAYGEligible(productId.toString());
+    boolean isPAYG = isPayg(Variant.findByTag(productId.toString()));
 
     // See SWATCH-745 for the reasoning on the same month restriction
     if (!isDateRangePossible || (isPAYG && !isBothDatesFromSameMonth)) {
@@ -290,16 +321,15 @@ public class InstancesResource implements InstancesApi {
       List<String> measurements,
       boolean isPAYG) {
     List<Double> measurementList = new ArrayList<>();
-    for (String uom : measurements) {
-      if (Measurement.Uom.SOCKETS.equals(Measurement.Uom.fromValue(uom))) {
+    for (String metric : measurements) {
+      if (MetricIdUtils.getSockets().equals(MetricId.fromString(metric))) {
         measurementList.add(Double.valueOf(tallyInstanceView.getSockets()));
-      } else if (!isPAYG
-          && tallyInstanceView.getKey().getUom().equals(Measurement.Uom.fromValue(uom))) {
+      } else if (!isPAYG && tallyInstanceView.getKey().getMetricId().equalsIgnoreCase(metric)) {
         measurementList.add(Optional.ofNullable(tallyInstanceView.getValue()).orElse(0.0));
       } else {
         measurementList.add(
             Optional.ofNullable(
-                    tallyInstanceView.getMonthlyTotal(monthId, Measurement.Uom.fromValue(uom)))
+                    tallyInstanceView.getMonthlyTotal(monthId, MetricId.fromString(metric)))
                 .orElse(0.0));
       }
     }
@@ -337,31 +367,5 @@ public class InstancesResource implements InstancesApi {
       case AZURE -> CloudProvider.AZURE;
       default -> null;
     };
-  }
-
-  private static Map<InstanceReportSort, Measurement.Uom> getSortToUomMap() {
-    return Arrays.stream(Measurement.Uom.values())
-        .filter(
-            uom ->
-                Arrays.stream(InstanceReportSort.values())
-                    .map(InstanceReportSort::toString)
-                    .filter(value -> !value.equals(Uom.SOCKETS.value()))
-                    .collect(Collectors.toSet())
-                    .contains(uom.value()))
-        .collect(
-            Collectors.toMap(
-                uom -> InstanceReportSort.fromValue(uom.value()), Function.identity()));
-  }
-
-  private static Map<InstanceReportSort, String> getUomSorts() {
-    return getSortToUomMap().keySet().stream()
-        .collect(Collectors.toMap(Function.identity(), key -> "value"));
-  }
-
-  private static Measurement.Uom getMeasurementUom(MetricId uom, InstanceReportSort sort) {
-    if (uom != null) {
-      return Measurement.Uom.fromValue(uom.toString());
-    }
-    return SORT_TO_UOM_MAP.get(sort);
   }
 }

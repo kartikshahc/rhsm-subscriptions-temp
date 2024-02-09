@@ -21,9 +21,12 @@
 package org.candlepin.subscriptions.tally.admin;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.transaction.Transactional;
+import jakarta.ws.rs.BadRequestException;
 import java.time.OffsetDateTime;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -33,6 +36,8 @@ import org.candlepin.subscriptions.event.EventController;
 import org.candlepin.subscriptions.json.Event;
 import org.candlepin.subscriptions.security.OptInController;
 import org.candlepin.subscriptions.tally.AccountResetService;
+import org.candlepin.subscriptions.tally.TallySnapshotController;
+import org.candlepin.subscriptions.tally.billing.ContractsController;
 import org.candlepin.subscriptions.tally.job.CaptureSnapshotsTaskManager;
 import org.candlepin.subscriptions.util.DateRange;
 import org.candlepin.subscriptions.utilization.api.model.OptInConfig;
@@ -46,21 +51,29 @@ public class InternalTallyDataController {
   private final CaptureSnapshotsTaskManager tasks;
   private final ObjectMapper objectMapper;
   private final OptInController controller;
+  private final ContractsController contractsController;
+  private final TallySnapshotController snapshotController;
 
   public InternalTallyDataController(
       AccountResetService accountResetService,
       EventController eventController,
       CaptureSnapshotsTaskManager tasks,
       ObjectMapper objectMapper,
-      OptInController controller) {
+      OptInController controller,
+      ContractsController contractsController,
+      TallySnapshotController snapshotController) {
     this.accountResetService = accountResetService;
     this.eventController = eventController;
     this.tasks = tasks;
     this.objectMapper = objectMapper;
     this.controller = controller;
+    this.contractsController = contractsController;
+    this.snapshotController = snapshotController;
   }
 
   public void deleteDataAssociatedWithOrg(String orgId) {
+    // we first delete the contracts and if it works, we continue with the rest of the data.
+    contractsController.deleteContractsWithOrg(orgId);
     accountResetService.deleteDataForOrg(orgId);
   }
 
@@ -76,16 +89,26 @@ public class InternalTallyDataController {
     tasks.updateOrgSnapshots(orgId);
   }
 
+  public void tallyOrgSync(String orgId) {
+    snapshotController.produceSnapshotsForOrg(orgId);
+  }
+
   public String saveEvents(String jsonListOfEvents) {
     List<Event> saved;
+    Collection<Event> events;
+
     try {
-      saved =
-          eventController.saveAll(
-              objectMapper.readValue(
-                  jsonListOfEvents,
-                  objectMapper.getTypeFactory().constructCollectionType(List.class, Event.class)));
+      events = objectMapper.readValue(jsonListOfEvents, new TypeReference<List<Event>>() {});
+
     } catch (Exception e) {
-      log.error("Error saving events", e);
+      log.warn("Error parsing request body");
+      throw new BadRequestException(e.getMessage());
+    }
+
+    try {
+      saved = eventController.saveAll(events);
+    } catch (Exception e) {
+      log.error("Error saving events, {}", e.getMessage());
       return "Error saving events";
     }
 
@@ -109,15 +132,11 @@ public class InternalTallyDataController {
     tasks.updateHourlySnapshotsForAllOrgs(Optional.ofNullable(range));
   }
 
-  public String createOrUpdateOptInConfig(String accountNumber, String orgId, OptInType api) {
-    OptInConfig config = controller.optIn(accountNumber, orgId, api);
+  public String createOrUpdateOptInConfig(String orgId, OptInType api) {
+    OptInConfig config = controller.optIn(orgId, api);
 
-    log.info(
-        "Completed opt in for account {} and org {}: \n{}",
-        accountNumber,
-        orgId,
-        config.toString());
-    String text = "Completed opt in for account %s and org %s";
-    return String.format(text, accountNumber, orgId);
+    log.info("Completed opt in for org {}: \n{}", orgId, config.toString());
+    String text = "Completed opt in for org %s";
+    return String.format(text, orgId);
   }
 }

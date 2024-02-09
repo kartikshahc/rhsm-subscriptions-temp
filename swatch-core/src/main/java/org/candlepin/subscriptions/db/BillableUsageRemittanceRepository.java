@@ -24,6 +24,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntity;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntityPK;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntityPK_;
@@ -32,6 +33,7 @@ import org.candlepin.subscriptions.db.model.RemittanceSummaryProjection;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,6 +45,8 @@ public interface BillableUsageRemittanceRepository
 
   @Query
   void deleteByKeyOrgId(String orgId);
+
+  List<BillableUsageRemittanceEntity> findByRetryAfterLessThan(OffsetDateTime asOf);
 
   default boolean existsBy(BillableUsageRemittanceFilter filter) {
     return this.exists(buildSearchSpecification(filter));
@@ -71,7 +75,6 @@ public interface BillableUsageRemittanceRepository
           key.get(BillableUsageRemittanceEntityPK_.ACCUMULATION_PERIOD),
           key.get(BillableUsageRemittanceEntityPK_.SLA),
           key.get(BillableUsageRemittanceEntityPK_.USAGE),
-          root.get(BillableUsageRemittanceEntity_.ACCOUNT_NUMBER),
           key.get(BillableUsageRemittanceEntityPK_.BILLING_PROVIDER),
           key.get(BillableUsageRemittanceEntityPK_.BILLING_ACCOUNT_ID),
           key.get(BillableUsageRemittanceEntityPK_.METRIC_ID),
@@ -83,7 +86,6 @@ public interface BillableUsageRemittanceRepository
             RemittanceSummaryProjection.class,
             criteriaBuilder.sum(root.get(BillableUsageRemittanceEntity_.REMITTED_PENDING_VALUE)),
             key.get(BillableUsageRemittanceEntityPK_.ORG_ID),
-            root.get(BillableUsageRemittanceEntity_.ACCOUNT_NUMBER),
             key.get(BillableUsageRemittanceEntityPK_.PRODUCT_ID),
             key.get(BillableUsageRemittanceEntityPK_.ACCUMULATION_PERIOD),
             key.get(BillableUsageRemittanceEntityPK_.SLA),
@@ -134,11 +136,6 @@ public interface BillableUsageRemittanceRepository
     };
   }
 
-  static Specification<BillableUsageRemittanceEntity> matchingAccountNumber(String account) {
-    return (root, query, builder) ->
-        builder.equal(root.get(BillableUsageRemittanceEntity_.accountNumber), account);
-  }
-
   static Specification<BillableUsageRemittanceEntity> matchingUsage(String usage) {
     return (root, query, builder) -> {
       var path = root.get(BillableUsageRemittanceEntity_.key);
@@ -183,9 +180,6 @@ public interface BillableUsageRemittanceRepository
       BillableUsageRemittanceFilter filter) {
 
     var searchCriteria = Specification.<BillableUsageRemittanceEntity>where(null);
-    if (Objects.nonNull(filter.getAccount())) {
-      searchCriteria = searchCriteria.and(matchingAccountNumber(filter.getAccount()));
-    }
     if (Objects.nonNull(filter.getProductId())) {
       searchCriteria = searchCriteria.and(matchingProductId(filter.getProductId()));
     }
@@ -223,4 +217,11 @@ public interface BillableUsageRemittanceRepository
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   void deleteAllByKeyOrgIdAndKeyRemittancePendingDateBefore(
       String orgId, OffsetDateTime cutoffDate);
+
+  @Modifying
+  @Query(
+      value =
+          "update BillableUsageRemittanceEntity bu set bu.remittedPendingValue=0.0 where bu.key.productId = :productId and bu.key.orgId in :orgIds and bu.key.remittancePendingDate between :start and :end")
+  int resetBillableUsageRemittance(
+      String productId, OffsetDateTime start, OffsetDateTime end, Set<String> orgIds);
 }

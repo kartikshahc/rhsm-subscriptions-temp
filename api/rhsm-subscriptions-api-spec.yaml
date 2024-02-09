@@ -57,18 +57,12 @@ paths:
               example:
                 data:
                   opt_in_complete: true
-                  account:
-                    account_number: 12345
-                    opt_in_type: 'API'
-                    created: '2017-08-04T17:32:05Z'
-                    last_updated: '2017-08-04T17:32:05Z'
                   org:
                     org_id: 1111
                     opt_in_type: 'API'
                     created: '2017-08-04T17:32:05Z'
                     last_updated: '2017-08-04T17:32:05Z'
                 meta:
-                  account_number: 12345
                   org_id: 1111
         '400':
           $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
@@ -79,7 +73,7 @@ paths:
         '500':
           $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
     put:
-      summary: "Create/Update an account's opt-in configuration. Account and Org ID are defined by the
+      summary: "Create/Update an account's opt-in configuration. Org ID are defined by the
                 identity header."
       operationId: putOptInConfig
       responses:
@@ -92,18 +86,12 @@ paths:
               example:
                 data:
                   opt_in_complete: true
-                  account:
-                    account_number: 12345
-                    opt_in_type: 'API'
-                    created: '2017-08-04T17:32:05Z'
-                    last_updated: '2017-08-04T17:32:05Z'
                   org:
                     org_id: 1111
                     opt_in_type: 'API'
                     created: '2017-08-04T17:32:05Z'
                     last_updated: '2017-08-04T17:32:05Z'
                 meta:
-                  account_number: 12345
                   org_id: 1111
         '400':
           $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
@@ -114,12 +102,12 @@ paths:
         '500':
           $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
     delete:
-      summary: "Delete an opt-in config for the associated account/org. The account number and org ID are
+      summary: "Delete an opt-in config for the associated org. The org ID are
                 pulled from the identity header."
       operationId: deleteOptInConfig
       responses:
         '204':
-          description: "Successfully deleted the opt-in configuration for the accociated account/org"
+          description: "Successfully deleted the opt-in configuration for the accociated org"
         '400':
           $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
         '403':
@@ -246,136 +234,6 @@ paths:
           $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
       tags:
         - tally
-  /tally/products/{product_id}:
-    description: "Operations for a tally report of a specific account and product."
-    parameters:
-      - name: product_id
-        in: path
-        required: true
-        schema:
-          $ref: '#/components/schemas/ProductId'
-        description: "The ID for the product we wish to query"
-      - name: offset
-        in: query
-        schema:
-          type: integer
-        description: "The number of items to skip before starting to collect the result set"
-      - name: limit
-        in: query
-        schema:
-          type: integer
-          minimum: 1
-        description: "The numbers of items to return"
-    get:
-      deprecated: true
-      summary: "(Deprecated for removal after 2022-05-01). Fetch a tally report for an account and product. If page header parameters are omitted,
-                then any gaps in the resulting report snapshots are filled with a default fake snapshot."
-      description: "Deprecated: use /tally/products/{product_id}/{metric_id} instead"
-      operationId: getTallyReport
-      parameters:
-        - name: granularity
-          in: query
-          required: true
-          schema:
-            $ref: '#/components/schemas/GranularityType'
-          description: "The level of granularity to return."
-        - name: sla
-          in: query
-          schema:
-            $ref: '#/components/schemas/ServiceLevelType'
-          description: "Include only snapshots matching the specified service level."
-        - name: usage
-          in: query
-          schema:
-            $ref: '#/components/schemas/UsageType'
-          description: "Include only snapshots matching the specified usage."
-        - name: beginning
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-          description: "Defines the start of the report period. Dates should be provided in ISO 8601
-            format but the only accepted offset is UTC. E.g. 2017-07-21T17:32:28Z"
-        - name: ending
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-          description: "Defines the end of the report period.  Defaults to the current time. Dates should
-            be provided in UTC."
-        - name: use_running_totals_format
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-      responses:
-        '200':
-          description: 'The request for a tally report was successful.'
-          content:
-            application/vnd.api+json:
-              schema:
-                $ref: "#/components/schemas/TallyReport"
-              example:
-                data:
-                  - date: '2017-08-04T17:32:05Z'
-                    instance_count: 10
-                    cores: 40
-                    sockets: 20
-                    physical_instance_count: 5
-                    physical_cores: 20
-                    physical_sockets: 4
-                    hypervisor_instance_count: 5
-                    hypervisor_cores: 20
-                    hypervisor_sockets: 4
-                  - date: '2017-08-05T17:31:04Z'
-                    instance_count: 7
-                    cores: 14
-                    sockets: 8
-                    physical_instance_count: 8
-                    physical_cores: 14
-                    physical_sockets: 8
-                    hypervisor_instance_count: 0
-                    hypervisor_cores: 0
-                    hypervisor_sockets: 0
-                  - date: '2017-08-06T17:32:03Z'
-                    instance_count: 24
-                    cores: 28
-                    sockets: 14
-                    physical_instance_count: 0
-                    physical_cores: 0
-                    physical_sockets: 0
-                    hypervisor_instance_count: 20
-                    hypervisor_cores: 20
-                    hypervisor_sockets: 10
-                    cloud_instance_count: 4
-                    cloud_cores: 8
-                    cloud_sockets: 4
-                links:
-                  first: '/api/rhsm-subscriptions/v1/tally/products/RHEL?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=0&limit=5'
-                  last: '/api/rhsm-subscriptions/v1/tally/products/RHEL?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
-                  previous: null
-                  next: '/api/rhsm-subscriptions/v1/tally/products/RHEL?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
-                meta:
-                  count: 10
-                  total_core_hours: 30
-                  total_instance_hours: 20
-                  product: RHEL
-                  granularity: Daily
-                  service_level: Premium
-                  usage: Production
-        '400':
-          $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
-        '403':
-          $ref: "../spec/error-responses.yaml#/$defs/Forbidden"
-        '404':
-          $ref: "../spec/error-responses.yaml#/$defs/ResourceNotFound"
-        '500':
-          $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
-      tags:
-        - tally
   /capacity/products/{product_id}/{metric_id}:
     description: 'Operations for capacity report for a given account and product'
     parameters:
@@ -383,13 +241,13 @@ paths:
         in: path
         required: true
         schema:
-          $ref: '#/components/schemas/ProductId'
+          $ref: "#/components/schemas/ProductId"
         description: "The ID for the product we wish to query"
       - name: metric_id
         in: path
         required: true
         schema:
-          $ref: '#/components/schemas/MetricId'
+          $ref: "#/components/schemas/MetricId"
         description: "The metric ID for the product we wish to query"
       - name: offset
         in: query
@@ -468,13 +326,13 @@ paths:
                     has_data: false
                     value: 0.0
                 links:
-                  first: '/api/rhsm-subscriptions/v1/capacity/RHEL/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=0&limit=5'
-                  last: '/api/rhsm-subscriptions/v1/capacity/RHEL/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
+                  first: '/api/rhsm-subscriptions/v1/capacity/RHEL%20for%20x86/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=0&limit=5'
+                  last: '/api/rhsm-subscriptions/v1/capacity/RHEL%20for%20x86/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
                   previous: null
-                  next: '/api/rhsm-subscriptions/v1/capacity/RHEL/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
+                  next: '/api/rhsm-subscriptions/v1/capacity/RHEL%20for%20x86/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
                 meta:
                   count: 10
-                  product: RHEL
+                  product: RHEL Server
                   granularity: Daily
                   service_level: Premium
         '400':
@@ -487,294 +345,6 @@ paths:
           $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
       tags:
         - capacity
-  /capacity/products/{product_id}:
-    description: 'Operations for capacity report for a given account and product'
-    parameters:
-      - name: product_id
-        in: path
-        required: true
-        schema:
-          $ref: '#/components/schemas/ProductId'
-        description: "The ID for the product we wish to query"
-      - name: offset
-        in: query
-        schema:
-          type: integer
-        description: "The number of items to skip before starting to collect the result set"
-      - name: limit
-        in: query
-        schema:
-          type: integer
-          minimum: 1
-        description: "The numbers of items to return"
-    get:
-      deprecated: true
-      summary: "(Deprecated) Fetch a capacity report for an account and product."
-      operationId: getCapacityReport
-      parameters:
-        - name: granularity
-          in: query
-          required: true
-          schema:
-            $ref: '#/components/schemas/GranularityType'
-          description: "The level of granularity to return."
-        - name: sla
-          in: query
-          schema:
-            $ref: '#/components/schemas/ServiceLevelType'
-          description: "Include only capacity for the specified service level."
-        - name: usage
-          in: query
-          schema:
-            $ref: '#/components/schemas/UsageType'
-          description: "Include only capacity for the specified usage level."
-        - name: beginning
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-          description: "Defines the start of the report period. Dates should be provided in ISO 8601
-            format but the only accepted offset is UTC. E.g. 2017-07-21T17:32:28Z"
-        - name: ending
-          in: query
-          required: true
-          schema:
-            type: string
-            format: date-time
-          description: "Defines the end of the report period.  Defaults to the current time. Dates should
-            be provided in UTC."
-      responses:
-        '200':
-          description: 'The request for a capacity report was successful.'
-          content:
-            application/vnd.api+json:
-              schema:
-                $ref: "#/components/schemas/CapacityReport"
-              example:
-                data:
-                  - date: '2017-08-04T17:32:05Z'
-                    sockets: 0
-                    physical_sockets: 0
-                    hypervisor_sockets: 0
-                    has_infinite_quantity: false
-                  - date: '2017-08-05T17:31:04Z'
-                    sockets: 0
-                    physical_sockets: 0
-                    hypervisor_sockets: 0
-                    has_infinite_quantity: false
-                  - date: '2017-08-06T17:32:03Z'
-                    sockets: 10
-                    physical_sockets: 5
-                    hypervisor_sockets: 5
-                    has_infinite_quantity: false
-                  - date: '2017-08-07T17:34:02Z'
-                    sockets: null
-                    physical_sockets: null
-                    hypervisor_sockets: null
-                    has_infinite_quantity: true
-                  - date: '2017-08-08T17:32:01Z'
-                    sockets: 10
-                    physical_sockets: 5
-                    hypervisor_sockets: 5
-                    has_infinite_quantity: true
-                links:
-                  first: '/api/rhsm-subscriptions/v1/capacity/RHEL?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=0&limit=5'
-                  last: '/api/rhsm-subscriptions/v1/capacity/RHEL?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
-                  previous: null
-                  next: '/api/rhsm-subscriptions/v1/capacity/RHEL?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
-                meta:
-                  count: 10
-                  product: RHEL
-                  granularity: Daily
-                  service_level: Premium
-        '400':
-          $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
-        '403':
-          $ref: "../spec/error-responses.yaml#/$defs/Forbidden"
-        '404':
-          $ref: "../spec/error-responses.yaml#/$defs/ResourceNotFound"
-        '500':
-          $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
-      tags:
-        - capacity
-  /hosts/products/{product_id}:
-    description: 'Operations for hosts for a given account and product'
-    parameters:
-      - name: product_id
-        in: path
-        required: true
-        schema:
-          $ref: '#/components/schemas/ProductId'
-        description: "The ID for the product we wish to query"
-      - name: offset
-        in: query
-        schema:
-          type: integer
-        description: "The number of items to skip before starting to collect the result set"
-      - name: limit
-        in: query
-        schema:
-          type: integer
-          minimum: 1
-          maximum: 100
-        description: "The numbers of items to return"
-    get:
-      summary: "Fetch hosts matching report criteria."
-      operationId: getHosts
-      parameters:
-        - name: sla
-          in: query
-          schema:
-            $ref: '#/components/schemas/ServiceLevelType'
-          description: "Include only hosts for the specified service level."
-        - name: usage
-          in: query
-          schema:
-            $ref: '#/components/schemas/UsageType'
-          description: "Include only hosts for the specified usage level."
-        - name: uom
-          in: query
-          schema:
-            $ref: '#/components/schemas/Uom'
-          description: "Filter hosts to those that contribute to a specific unit of measure"
-        - name: display_name_contains
-          description: Include only hosts containing the specified display name. Passing an empty string behaves the same way as passing null
-          schema:
-            type: string
-            #Default to empty string to prevent complex jpql statement later
-            default: ''
-          in: query
-        - name: beginning
-          in: query
-          required: false
-          schema:
-            type: string
-            format: date-time
-          description: "Defines the start of the report period. Dates should be provided in ISO 8601
-            format but the only accepted offset is UTC. E.g. 2017-07-21T17:32:28Z.
-            Only applicable for OpenShift-dedicated-metrics and OpenShift-metrics products"
-        - name: ending
-          in: query
-          required: false
-          schema:
-            type: string
-            format: date-time
-          description: "Defines the end of the report period. Dates should be provided in ISO 8601
-            format but the only accepted offset is UTC. E.g. 2017-07-21T17:32:28Z.
-            Only applicable for OpenShift-dedicated-metrics and OpenShift-metrics products"
-        - name: sort
-          in: query
-          schema:
-            $ref: "#/components/schemas/HostReportSort"
-          description: "What property to sort by (optional)"
-        - name: dir
-          in: query
-          schema:
-            $ref: "#/components/schemas/SortDirection"
-          description: "Which direction to sort by (default: asc)"
-      responses:
-        '200':
-          description: 'The request for hosts was successful.'
-          content:
-            application/vnd.api+json:
-              schema:
-                $ref: "#/components/schemas/HostReport"
-              example:
-                data:
-                  - inventory_id: d6214a0b-b344-4778-831c-d53dcacb2da3
-                    display_name: rhv.example.com
-                    subscription_manager_id: adafd9d5-5b00-42fa-a6c9-75801d45cc6d
-                    cores: 4
-                    sockets: 2
-                    hardware_type: hypervisor
-                    number_of_guests: 4
-                    last_seen: 2020-01-01T00:00:00Z
-                  - inventory_id: 9358e312-1c9f-42f4-8910-dcef6e970852
-                    display_name: db.example.com
-                    subscription_manager_id: b101a72f-1859-4489-acb8-d6d31c2578c4
-                    cores: 4
-                    sockets: 2
-                    hardware_type: physical
-                    last_seen: 2020-01-01T00:00:00Z
-                links:
-                  first: '/api/rhsm-subscriptions/v1/hosts/RHEL?sla=Premium&usage=Production&offset=0&limit=5'
-                  last: '/api/rhsm-subscriptions/v1/hosts/RHEL?sla=Premium&usage=Production&offset=5&limit=5'
-                  previous: null
-                  next: '/api/rhsm-subscriptions/v1/hosts/RHEL?sla=Premium&usage=Production&offset=5&limit=5'
-                meta:
-                  count: 10
-                  product: RHEL
-                  service_level: Premium
-                  usage: Production
-        '400':
-          $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
-        '403':
-          $ref: "../spec/error-responses.yaml#/$defs/Forbidden"
-        '404':
-          $ref: "../spec/error-responses.yaml#/$defs/ResourceNotFound"
-        '500':
-          $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
-      tags:
-        - hosts
-  /hosts/{hypervisor_uuid}/guests:
-    description: 'Operations for hypervisor-guest mappings.'
-    parameters:
-      - name: hypervisor_uuid
-        in: path
-        required: true
-        schema:
-          type: string
-        description: "The subscription-manager ID for the hypervisor we wish to query"
-      - name: offset
-        in: query
-        schema:
-          type: integer
-        description: "The number of items to skip before starting to collect the result set"
-      - name: limit
-        in: query
-        schema:
-          type: integer
-          minimum: 1
-          maximum: 100
-        description: "The numbers of items to return"
-    get:
-      summary: "Fetch guests for this hypervisor."
-      operationId: getHypervisorGuests
-      responses:
-        '200':
-          description: 'The request for a capacity report was successful.'
-          content:
-            application/vnd.api+json:
-              schema:
-                $ref: "#/components/schemas/HypervisorGuestReport"
-              example:
-                data:
-                  - inventory_id: d6214a0b-b344-4778-831c-d53dcacb2da3
-                    display_name: guest01.example.com
-                    subscription_manager_id: adafd9d5-5b00-42fa-a6c9-75801d45cc6d
-                    last_seen: 2020-01-01T00:00:00Z
-                  - inventory_id: 9358e312-1c9f-42f4-8910-dcef6e970852
-                    display_name: guest02.example.com
-                    subscription_manager_id: b101a72f-1859-4489-acb8-d6d31c2578c4
-                    last_seen: 2020-01-01T00:00:00Z
-                links:
-                  first: '/api/rhsm-subscriptions/v1/hosts/a283ffb6-e0f3-4dbe-9732-ccfdb297ba07/guests?offset=0&limit=5'
-                  last: '/api/rhsm-subscriptions/v1/hosts/a283ffb6-e0f3-4dbe-9732-ccfdb297ba07/guests?offset=5&limit=5'
-                  previous: null
-                  next: '/api/rhsm-subscriptions/v1/hosts/a283ffb6-e0f3-4dbe-9732-ccfdb297ba07/guests?offset=5&limit=5'
-                meta:
-                  count: 10
-        '400':
-          $ref: "../spec/error-responses.yaml#/$defs/BadRequest"
-        '403':
-          $ref: "../spec/error-responses.yaml#/$defs/Forbidden"
-        '404':
-          $ref: "../spec/error-responses.yaml#/$defs/ResourceNotFound"
-        '500':
-          $ref: "../spec/error-responses.yaml#/$defs/InternalServerError"
-      tags:
-        - hosts
   /instances/{id}/guests:
     description: 'Operations for instance-id mappings.'
     parameters:
@@ -840,7 +410,7 @@ paths:
         in: path
         required: true
         schema:
-          $ref: '#/components/schemas/ProductId'
+          $ref: "#/components/schemas/ProductId"
       - name: offset
         in: query
         schema:
@@ -869,7 +439,7 @@ paths:
         - name: uom
           in: query
           schema:
-            $ref: '#/components/schemas/MetricId'
+            type: string
           description: "Include only hosts with a specific unit of measure"
         - name: billing_provider
           in: query
@@ -914,8 +484,9 @@ paths:
         - name: sort
           in: query
           schema:
-            $ref: "#/components/schemas/InstanceReportSort"
-          description: "What property to sort by (optional)"
+            type: string
+          description: "What property to sort by. Options are: display_name, last_seen, billing_provider, 
+                     number_of_guests, category, or by a metric ID. (optional)"
         - name: dir
           in: query
           schema:
@@ -937,7 +508,7 @@ paths:
         in: path
         required: true
         schema:
-          $ref: '#/components/schemas/ProductId'
+          $ref: "#/components/schemas/ProductId"
         description: "The ID for the product we wish to query"
       - name: offset
         in: query
@@ -1136,40 +707,6 @@ components:
     BillingProviderType:
       type: string
       enum: [ "", red hat, aws, gcp, azure, oracle, _ANY ]
-    ProductId:
-      type: string
-      enum:
-        - OpenShift Container Platform
-        - RHEL
-        - RHEL Compute Node
-        - RHEL Desktop
-        - RHEL for ARM
-        - RHEL for IBM Power
-        - RHEL for IBM z
-        - RHEL for x86
-        - RHEL Server
-        - RHEL Workstation
-        - Satellite
-        - Satellite Capsule
-        - Satellite Server
-        - OpenShift-metrics
-        - OpenShift-dedicated-metrics
-        - rhosak
-        - rhacs
-        - rhods
-        - BASILISK
-        - rosa
-    MetricId:
-      type: string
-      enum:
-        # Cores is the same as core-hours
-        - Cores
-        - Sockets
-        - Core-seconds
-        - Instance-hours
-        - Storage-gibibyte-months
-        - Storage-gibibytes
-        - Transfer-gibibytes
     ReportCategory:
       type: string
       enum:
@@ -1231,8 +768,6 @@ components:
           required:
             - org_id
           properties:
-            account_number:
-              type: string
             org_id:
               type: string
         data:
@@ -1249,8 +784,6 @@ components:
                 - created
                 - last_updated
               properties:
-                account_number:
-                  type: string
                 opt_in_type:
                   type: string
                 created:
@@ -1307,9 +840,9 @@ components:
             count:
               type: integer
             total_monthly:
-              $ref: "#/components/schemas/TallyReportDataPoint"
+              $ref: "#/components/schemas/TallyReportTotalMonthly"
             product:
-              $ref: '#/components/schemas/ProductId'
+              type: string
             metric_id:
               type: string
             service_level:
@@ -1342,159 +875,21 @@ components:
           format: int32
         has_data:
           type: boolean
-    TallyReport:
-      deprecated: true
-      properties:
-        data:
-          type: array
-          items:
-            $ref: "#/components/schemas/TallySnapshot"
-        links:
-          $ref: "#/components/schemas/PageLinks"
-        meta:
-          type: object
-          properties:
-            count:
-              type: integer
-            total_core_hours:
-              type: number
-              format: double
-            total_instance_hours:
-              type: number
-              format: double
-            product:
-              $ref: '#/components/schemas/ProductId'
-            service_level:
-              $ref: '#/components/schemas/ServiceLevelType'
-            usage:
-              $ref: '#/components/schemas/UsageType'
-            granularity:
-              $ref: '#/components/schemas/GranularityType'
-          required:
-            - count
-            - product
-            - granularity
-    TallySnapshot:
-      deprecated: true
+    TallyReportTotalMonthly:
+      description: "Tally report monthly summary."
       required:
-        - date
-        - instance_count
+        - value
       properties:
         date:
-          description: "The start date for this snapshot entry. Dates are returned in UTC. Clients must
-            consult the 'granularity' field in the TallyReport to determine the length of time each
-            TallySnapshot covers."
+          description: "Date of the tally report."
           type: string
           format: date-time
-        instance_count:
-          description: "Total systems matching the report criteria on the date of this snapshot."
+          nullable: true
+        value:
           type: integer
           format: int32
-          minimum: 0
-          default: 0
-        cores:
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        core_hours:
-          type: number
-          format: double
-          minimum: 0
-          default: 0
-        instance_hours:
-          type: number
-          format: double
-          minimum: 0
-          default: 0
-        sockets:
-          description: "Total number of sockets calculated from systems matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        physical_instance_count:
-          description: "Total number of physical systems matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        physical_cores:
-          description: "Total number of cores calculated from physical systems matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        physical_sockets:
-          description: "Total number of sockets calculated from physical systems matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        hypervisor_instance_count:
-          description: "Total number of hypervisors matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        hypervisor_cores:
-          description: "Total number of cores calculated from hypervisors matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        hypervisor_sockets:
-          description: "Total number of sockets calculated from hypervisors matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        cloud_instance_count:
-          description: "Total number of hosts running on a public cloud provider, matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        cloud_cores:
-          description: "Total number of cores calculated from hosts running on a public cloud provider, matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
-        cloud_sockets:
-          description: "Total number of sockets calculated from hosts running on a public cloud provider, matching the report criteria on the date of this snapshot."
-          type: integer
-          format: int32
-          minimum: 0
-          default: 0
         has_data:
           type: boolean
-    CapacityReport:
-      deprecated: true
-      properties:
-        data:
-          type: array
-          items:
-            $ref: "#/components/schemas/CapacitySnapshot"
-        links:
-          $ref: "#/components/schemas/PageLinks"
-        meta:
-          type: object
-          properties:
-            count:
-              type: integer
-            product:
-              $ref: '#/components/schemas/ProductId'
-            granularity:
-              $ref: '#/components/schemas/GranularityType'
-            service_level:
-              $ref: '#/components/schemas/ServiceLevelType'
-            usage:
-              $ref: '#/components/schemas/UsageType'
-          required:
-            - count
-            - product
-            - granularity
     CapacityReportByMetricId:
       properties:
         data:
@@ -1509,9 +904,9 @@ components:
             count:
               type: integer
             product:
-              $ref: '#/components/schemas/ProductId'
+              type: string
             metric_id:
-              $ref: '#/components/schemas/MetricId'
+              type: string
             granularity:
               $ref: '#/components/schemas/GranularityType'
             service_level:
@@ -1524,53 +919,6 @@ components:
             - count
             - product
             - granularity
-    CapacitySnapshot:
-      deprecated: true
-      required:
-        - date
-        - has_infinite_quantity
-      properties:
-        date:
-          type: string
-          format: date-time
-          description: "The start date for this snapshot entry. Dates are returned in UTC. Clients must
-            consult the 'granularity' field in the CapacityReport to determine the length of time each
-            CapacitySnapshot covers."
-        sockets:
-          description: "Total socket capacity."
-          type: integer
-          format: int32
-          minimum: 0
-        physical_sockets:
-          description: "Physical socket capacity."
-          type: integer
-          format: int32
-          minimum: 0
-        hypervisor_sockets:
-          description: "Hypervisor socket capacity."
-          type: integer
-          format: int32
-          minimum: 0
-        cores:
-          description: "Total cores capacity."
-          type: integer
-          format: int32
-          minimum: 0
-        physical_cores:
-          description: "Total physical cores capacity."
-          type: integer
-          format: int32
-          minimum: 0
-        hypervisor_cores:
-          description: "Total hypervisor cores capacity."
-          type: integer
-          format: int32
-          minimum: 0
-        has_infinite_quantity:
-          description: "Indicates whether this snapshot has an infinite quantity subscription included.
-            If there is an infinite quantity subscription involved, there is no meaningful number for
-            capacity."
-          type: boolean
     CapacitySnapshotByMetricId:
       required:
         - date
@@ -1592,17 +940,6 @@ components:
           minimum: 0
         has_infinite_quantity:
           type: boolean
-    HostReportSort:
-      type: string
-      enum:
-        - display_name
-        - hardware_type
-        - cores
-        - sockets
-        - last_seen
-        - measurement_type
-        - core_hours
-        - instance_hours
     HostReport:
       properties:
         data:
@@ -1617,7 +954,7 @@ components:
             count:
               type: integer
             product:
-              $ref: '#/components/schemas/ProductId'
+              type: string
             service_level:
               $ref: '#/components/schemas/ServiceLevelType'
             usage:
@@ -1627,16 +964,6 @@ components:
           required:
             - count
             - product
-    HypervisorGuestReport:
-      properties:
-        data:
-          type: array
-          items:
-            $ref: "#/components/schemas/Host"
-        links:
-          $ref: "#/components/schemas/PageLinks"
-        meta:
-          $ref: "#/components/schemas/MetaCount"
     InstanceGuestReport:
       properties:
         data:
@@ -1717,7 +1044,7 @@ components:
           format: int32
           type: integer
         product:
-          $ref: '#/components/schemas/ProductId'
+          type: string
         service_level:
           $ref: '#/components/schemas/ServiceLevelType'
         usage:
@@ -1732,7 +1059,7 @@ components:
             type: string
       example:
         count: 10
-        product: RHEL
+        product: RHEL Server
         service_level: Premium
         usage: Production
         measurements:
@@ -1781,21 +1108,6 @@ components:
           next: string
         meta:
           count: 10
-    InstanceReportSort:
-      type: string
-      enum:
-        - display_name
-        - last_seen
-        - Cores
-        - Sockets
-        - Core-seconds
-        - Instance-hours
-        - Storage-gibibytes
-        - Storage-gibibyte-months
-        - Transfer-gibibytes
-        - billing_provider
-        - number_of_guests
-        - category
     InstanceData:
       title: Root Type for Instance
       description: The representation of a product cluster data
@@ -1849,8 +1161,6 @@ components:
     CandlepinPool:
       description: Subset of Candlepin pool data that rhsm-subscriptions understands.
       properties:
-        accountNumber:
-          type: string
         activeSubscription:
           type: boolean
         startDate:
@@ -1984,7 +1294,7 @@ components:
             count:
               type: integer
             product:
-              $ref: '#/components/schemas/ProductId'
+              type: string
             service_level:
               $ref: '#/components/schemas/ServiceLevelType'
             usage:
@@ -1999,6 +1309,12 @@ components:
             - count
             - product
             - subscription_type
+    ProductId:
+      type: string
+      format: ProductId
+    MetricId:
+      type: string
+      format: MetricId
 
 security:
   - 3ScaleIdentity: []

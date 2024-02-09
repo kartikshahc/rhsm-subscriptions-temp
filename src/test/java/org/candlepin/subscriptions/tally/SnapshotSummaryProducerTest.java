@@ -28,6 +28,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -41,7 +43,6 @@ import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.TallyMeasurementKey;
 import org.candlepin.subscriptions.db.model.TallySnapshot;
 import org.candlepin.subscriptions.db.model.Usage;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 import org.candlepin.subscriptions.json.TallyMeasurement;
 import org.candlepin.subscriptions.json.TallySummary;
 import org.junit.jupiter.api.BeforeEach;
@@ -81,27 +82,25 @@ class SnapshotSummaryProducerTest {
         "org1",
         List.of(
             buildSnapshot(
-                "a1",
                 "org1",
                 "OSD",
                 Granularity.HOURLY,
                 ServiceLevel.PREMIUM,
                 Usage.PRODUCTION,
                 BillingProvider.RED_HAT,
-                Uom.CORES,
+                MetricIdUtils.getCores().getValue(),
                 20.4)));
     updateMap.put(
         "org2",
         List.of(
             buildSnapshot(
-                "a2",
                 "org2",
                 "OCP",
                 Granularity.HOURLY,
                 ServiceLevel.PREMIUM,
                 Usage.PRODUCTION,
                 BillingProvider.AWS,
-                Uom.CORES,
+                MetricIdUtils.getCores().getValue(),
                 22.2)));
     producer.produceTallySummaryMessages(updateMap);
     verify(kafka, times(2)).send(eq(props.getTopic()), any(), summaryCaptor.capture());
@@ -109,44 +108,40 @@ class SnapshotSummaryProducerTest {
     List<TallySummary> summaries = summaryCaptor.getAllValues();
     assertEquals(2, summaries.size());
     Map<String, List<TallySummary>> results =
-        summaries.stream().collect(Collectors.groupingBy(TallySummary::getAccountNumber));
+        summaries.stream().collect(Collectors.groupingBy(TallySummary::getOrgId));
     assertSummary(
         results,
-        "a1",
         "org1",
         "OSD",
         Granularity.HOURLY,
         ServiceLevel.PREMIUM,
         Usage.PRODUCTION,
-        Uom.CORES,
+        MetricIdUtils.getCores(),
         20.4);
     assertSummary(
         results,
-        "a2",
         "org2",
         "OCP",
         Granularity.HOURLY,
         ServiceLevel.PREMIUM,
         Usage.PRODUCTION,
-        Uom.CORES,
+        MetricIdUtils.getCores(),
         22.2);
   }
 
   void assertSummary(
       Map<String, List<TallySummary>> results,
-      String account,
       String orgId,
       String product,
       Granularity granularity,
       ServiceLevel sla,
       Usage usage,
-      Uom uom,
+      MetricId uom,
       double value) {
-    assertTrue(results.containsKey(account));
-    List<TallySummary> accountSummaries = results.get(account);
+    assertTrue(results.containsKey(orgId));
+    List<TallySummary> accountSummaries = results.get(orgId);
     assertEquals(1, accountSummaries.size());
     TallySummary expectedSummary = accountSummaries.get(0);
-    assertEquals(account, expectedSummary.getAccountNumber());
     assertEquals(orgId, expectedSummary.getOrgId());
 
     assertEquals(1, expectedSummary.getTallySnapshots().size());
@@ -172,14 +167,13 @@ class SnapshotSummaryProducerTest {
         "a1",
         List.of(
             buildSnapshot(
-                "a1",
                 "org_1",
                 "OSD",
                 Granularity.HOURLY,
                 ServiceLevel.PREMIUM,
                 Usage.PRODUCTION,
                 BillingProvider.RED_HAT,
-                Uom.CORES,
+                MetricIdUtils.getCores().getValue(),
                 20.4)));
     updateMap.get("a1").get(0).getTallyMeasurements().clear();
     producer.produceTallySummaryMessages(updateMap);
@@ -189,7 +183,7 @@ class SnapshotSummaryProducerTest {
   void assertMeasurement(
       Map<String, List<TallyMeasurement>> measurements,
       String hardwareType,
-      Uom uom,
+      MetricId metricId,
       double value) {
     Optional<List<TallyMeasurement>> optionalTotal =
         Optional.ofNullable(measurements.get(hardwareType));
@@ -198,25 +192,23 @@ class SnapshotSummaryProducerTest {
     TallyMeasurement measurement = optionalTotal.get().get(0);
 
     assertEquals(hardwareType, measurement.getHardwareMeasurementType());
-    assertEquals(uom.value(), measurement.getUom().value());
+    assertEquals(metricId.toUpperCaseFormatted(), measurement.getUom());
     assertEquals(value, measurement.getValue());
   }
 
   TallySnapshot buildSnapshot(
-      String account,
       String orgId,
       String productId,
       Granularity granularity,
       ServiceLevel sla,
       Usage usage,
       BillingProvider billingProvider,
-      Uom uom,
+      String metricId,
       double val) {
     Map<TallyMeasurementKey, Double> measurements = new HashMap<>();
-    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.PHYSICAL, uom), val);
-    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.TOTAL, uom), val);
+    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.PHYSICAL, metricId), val);
+    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.TOTAL, metricId), val);
     return TallySnapshot.builder()
-        .accountNumber(account)
         .orgId(orgId)
         .productId(productId)
         .snapshotDate(OffsetDateTime.now())

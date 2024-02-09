@@ -23,33 +23,35 @@ package org.candlepin.subscriptions.tally;
 import static org.candlepin.subscriptions.task.queue.kafka.KafkaTaskProducerConfiguration.getProducerProperties;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Executor;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.ApplicationProperties;
 import org.candlepin.subscriptions.db.AccountServiceInventoryRepository;
+import org.candlepin.subscriptions.db.HostRepository;
 import org.candlepin.subscriptions.event.EventController;
 import org.candlepin.subscriptions.inventory.db.InventoryDataSourceConfiguration;
+import org.candlepin.subscriptions.json.BillableUsage;
 import org.candlepin.subscriptions.json.TallySummary;
 import org.candlepin.subscriptions.product.ProductConfiguration;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.tally.billing.BillingProducerConfiguration;
 import org.candlepin.subscriptions.tally.facts.FactNormalizer;
 import org.candlepin.subscriptions.task.TaskQueueProperties;
 import org.candlepin.subscriptions.task.queue.TaskConsumer;
 import org.candlepin.subscriptions.task.queue.TaskConsumerConfiguration;
 import org.candlepin.subscriptions.task.queue.TaskConsumerFactory;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.util.KafkaConsumerRegistry;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.AutoConfigurationExcludeFilter;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.context.TypeExcludeFilter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Profile;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
@@ -58,6 +60,9 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
 import org.springframework.retry.annotation.EnableRetry;
 import org.springframework.retry.backoff.FixedBackOffPolicy;
@@ -66,6 +71,7 @@ import org.springframework.retry.support.RetryTemplate;
 import org.springframework.retry.support.RetryTemplateBuilder;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.util.backoff.FixedBackOff;
 
 /**
  * Configuration for the "worker" profile.
@@ -90,13 +96,20 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
       "org.candlepin.subscriptions.inventory.db",
       "org.candlepin.subscriptions.tally",
       "org.candlepin.subscriptions.retention"
+    },
+    // Prevent TestConfiguration annotated classes from being picked up by ComponentScan
+    excludeFilters = {
+      @ComponentScan.Filter(type = FilterType.CUSTOM, classes = TypeExcludeFilter.class),
+      @ComponentScan.Filter(
+          type = FilterType.CUSTOM,
+          classes = AutoConfigurationExcludeFilter.class)
     })
 public class TallyWorkerConfiguration {
 
   @Bean
   public FactNormalizer factNormalizer(
-      ApplicationProperties applicationProperties, TagProfile tagProfile, ApplicationClock clock) {
-    return new FactNormalizer(applicationProperties, tagProfile, clock);
+      ApplicationProperties applicationProperties, ApplicationClock clock) {
+    return new FactNormalizer(applicationProperties, clock);
   }
 
   @Bean(name = "collectorRetryTemplate")
@@ -130,18 +143,6 @@ public class TallyWorkerConfiguration {
         .build();
   }
 
-  @Bean(name = "applicableProducts")
-  public Set<String> applicableProducts(TagProfile tagProfile) {
-    Set<String> products = new HashSet<>();
-    Map<Integer, Set<String>> productToProductIds =
-        tagProfile.getEngProductIdToSwatchProductIdsMap();
-    productToProductIds.values().forEach(products::addAll);
-
-    Map<String, Set<String>> roleToProducts = tagProfile.getRoleToTagLookup();
-    roleToProducts.values().forEach(products::addAll);
-    return products;
-  }
-
   @Bean
   @Qualifier("tallyTaskConsumer")
   public TaskConsumer tallyTaskProcessor(
@@ -154,12 +155,12 @@ public class TallyWorkerConfiguration {
 
   @Bean
   public MetricUsageCollector metricUsageCollector(
-      TagProfile tagProfile,
       AccountServiceInventoryRepository accountServiceInventoryRepository,
       EventController eventController,
-      ApplicationClock clock) {
+      ApplicationClock clock,
+      HostRepository hostRepository) {
     return new MetricUsageCollector(
-        tagProfile, accountServiceInventoryRepository, eventController, clock);
+        accountServiceInventoryRepository, eventController, clock, hostRepository);
   }
 
   @Bean
@@ -194,10 +195,45 @@ public class TallyWorkerConfiguration {
   }
 
   @Bean
+  public ProducerFactory<String, String> eventDeadLetterProducerFactory(
+      KafkaProperties kafkaProperties, ObjectMapper objectMapper) {
+    DefaultKafkaProducerFactory<String, String> factory =
+        new DefaultKafkaProducerFactory<>(getProducerProperties(kafkaProperties));
+    /*
+    Use our customized ObjectMapper. Notably, the spring-kafka default ObjectMapper writes dates as
+    timestamps, which produces messages not compatible with JSON-B deserialization.
+     */
+    factory.setValueSerializer(new JsonSerializer<>(objectMapper));
+    return factory;
+  }
+
+  @Bean
+  public KafkaTemplate<String, String> eventDeadLetterKafkaTemplate(
+      ProducerFactory<String, String> eventDeadLetterProducerFactory) {
+    return new KafkaTemplate<>(eventDeadLetterProducerFactory);
+  }
+
+  @Bean
+  @Qualifier("eventDeadLetterKafkaErrorHandler")
+  public DefaultErrorHandler eventDeadLetterKafkaErrorHandler(
+      KafkaTemplate<String, String> eventDeadLetterKafkaTemplate,
+      @Qualifier("serviceInstanceDeadLetterTopicProperties")
+          TaskQueueProperties taskQueueProperties) {
+    DeadLetterPublishingRecoverer recoverer =
+        new DeadLetterPublishingRecoverer(
+            eventDeadLetterKafkaTemplate,
+            (r, e) -> new TopicPartition(taskQueueProperties.getTopic(), r.partition()));
+    return new DefaultErrorHandler(
+        recoverer,
+        new FixedBackOff(
+            taskQueueProperties.getRetryBackOffMillis(), taskQueueProperties.getRetryAttempts()));
+  }
+
+  @Bean
   @Qualifier("serviceInstanceConsumerFactory")
   ConsumerFactory<String, String> serviceInstanceConsumerFactory(
       KafkaProperties kafkaProperties,
-      @Qualifier("tallyTaskQueueProperties") TaskQueueProperties taskQueueProperties) {
+      @Qualifier("serviceInstanceTopicProperties") TaskQueueProperties taskQueueProperties) {
     var props = kafkaProperties.buildConsumerProperties();
     props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, taskQueueProperties.getMaxPollRecords());
     return new DefaultKafkaConsumerFactory<>(
@@ -210,7 +246,9 @@ public class TallyWorkerConfiguration {
           @Qualifier("serviceInstanceConsumerFactory")
               ConsumerFactory<String, String> consumerFactory,
           KafkaProperties kafkaProperties,
-          KafkaConsumerRegistry registry) {
+          KafkaConsumerRegistry registry,
+          @Qualifier("eventDeadLetterKafkaErrorHandler")
+              DefaultErrorHandler deadLetterErrorHandler) {
 
     var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
     factory.setConsumerFactory(consumerFactory);
@@ -224,6 +262,7 @@ public class TallyWorkerConfiguration {
     }
     // hack to track the Kafka consumers, so SeekableKafkaConsumer can commit when needed
     factory.getContainerProperties().setConsumerRebalanceListener(registry);
+    factory.setCommonErrorHandler(deadLetterErrorHandler);
     return factory;
   }
 
@@ -232,6 +271,64 @@ public class TallyWorkerConfiguration {
   @ConfigurationProperties(prefix = "rhsm-subscriptions.service-instance-ingress.incoming")
   public TaskQueueProperties serviceInstanceTopicProperties() {
     return new TaskQueueProperties();
+  }
+
+  @Bean
+  @Qualifier("serviceInstanceDeadLetterTopicProperties")
+  @ConfigurationProperties(
+      prefix = "rhsm-subscriptions.service-instance-ingress-dead-letter.outgoing")
+  public TaskQueueProperties serviceInstanceDeadLetterTopicProperties() {
+    return new TaskQueueProperties();
+  }
+
+  @Bean
+  @Qualifier("billableUsageDeadLetterTopicProperties")
+  @ConfigurationProperties(prefix = "rhsm-subscriptions.billable-usage-dead-letter.incoming")
+  public TaskQueueProperties billableUsageDeadLetterTopicProperties() {
+    return new TaskQueueProperties();
+  }
+
+  @Bean
+  public JsonDeserializer<BillableUsage> billableUsageJsonDeserializer(ObjectMapper objectMapper) {
+    return new JsonDeserializer<>(BillableUsage.class, objectMapper, false);
+  }
+
+  @Bean
+  @Qualifier("billableUsageDeadLetterConsumerFactory")
+  ConsumerFactory<String, BillableUsage> billableUsageDeadLetterConsumerFactory(
+      JsonDeserializer<BillableUsage> jsonDeserializer,
+      KafkaProperties kafkaProperties,
+      @Qualifier("billableUsageDeadLetterTopicProperties")
+          TaskQueueProperties taskQueueProperties) {
+    var props = kafkaProperties.buildConsumerProperties(null);
+    props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, taskQueueProperties.getMaxPollRecords());
+    var factory =
+        new DefaultKafkaConsumerFactory<>(props, new StringDeserializer(), jsonDeserializer);
+    factory.setValueDeserializer(jsonDeserializer);
+    return factory;
+  }
+
+  @Bean
+  ConcurrentKafkaListenerContainerFactory<String, BillableUsage>
+      kafkaBillableUsageDeadLetterListenerContainerFactory(
+          @Qualifier("billableUsageDeadLetterConsumerFactory")
+              ConsumerFactory<String, BillableUsage> consumerFactory,
+          KafkaProperties kafkaProperties,
+          KafkaConsumerRegistry registry) {
+
+    var factory = new ConcurrentKafkaListenerContainerFactory<String, BillableUsage>();
+    factory.setConsumerFactory(consumerFactory);
+    factory.setBatchListener(true);
+    // Concurrency should be set to the number of partitions for the target topic.
+    factory.setConcurrency(kafkaProperties.getListener().getConcurrency());
+    if (kafkaProperties.getListener().getIdleEventInterval() != null) {
+      factory
+          .getContainerProperties()
+          .setIdleEventInterval(kafkaProperties.getListener().getIdleEventInterval().toMillis());
+    }
+    // hack to track the Kafka consumers, so SeekableKafkaConsumer can commit when needed
+    factory.getContainerProperties().setConsumerRebalanceListener(registry);
+    return factory;
   }
 
   @Bean(name = "purgeRemittancesJobExecutor")

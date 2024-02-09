@@ -24,12 +24,12 @@ import java.time.OffsetDateTime;
 import java.util.Set;
 import lombok.Builder;
 import lombok.Data;
+import org.candlepin.subscriptions.db.HypervisorReportCategory;
 
 /** Common criteria that can be used to filter instances, subscriptions, and tally snapshots */
 @Data
 @Builder
 public class DbReportCriteria {
-  private String accountNumber;
   private String orgId;
   private String productTag;
   // TODO: ENT-5042 should move away from using product name values here //NOSONAR
@@ -42,4 +42,6 @@ public class DbReportCriteria {
   private boolean payg;
   private OffsetDateTime beginning;
   private OffsetDateTime ending;
+  private String metricId;
+  private HypervisorReportCategory hypervisorReportCategory;
 }

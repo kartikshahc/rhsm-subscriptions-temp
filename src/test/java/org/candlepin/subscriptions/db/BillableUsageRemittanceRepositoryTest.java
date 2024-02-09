@@ -22,22 +22,22 @@ package org.candlepin.subscriptions.db;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Optional;
 import java.util.TimeZone;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntity;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntityPK;
 import org.candlepin.subscriptions.db.model.InstanceMonthlyTotalKey;
 import org.candlepin.subscriptions.db.model.RemittanceSummaryProjection;
 import org.candlepin.subscriptions.json.BillableUsage.BillingProvider;
 import org.candlepin.subscriptions.json.BillableUsage.Sla;
-import org.candlepin.subscriptions.json.BillableUsage.Uom;
 import org.candlepin.subscriptions.json.BillableUsage.Usage;
 import org.candlepin.subscriptions.test.TestClockConfiguration;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -112,11 +112,7 @@ class BillableUsageRemittanceRepositoryTest {
     var accountMonthlyList = List.of(remittance1, remittance2);
     repository.saveAllAndFlush(accountMonthlyList);
     List<BillableUsageRemittanceEntity> found =
-        repository.filterBy(
-            BillableUsageRemittanceFilter.builder()
-                .account(remittance1.getAccountNumber())
-                .productId("product1")
-                .build());
+        repository.filterBy(BillableUsageRemittanceFilter.builder().productId("product1").build());
     assertFalse(found.isEmpty());
     assertEquals(accountMonthlyList, found);
   }
@@ -135,7 +131,7 @@ class BillableUsageRemittanceRepositoryTest {
             .billingAccountId(orgId + "_ba")
             .productId(productId)
             .sla(Sla.PREMIUM.value())
-            .metricId(Uom.CORES.value())
+            .metricId(MetricIdUtils.getCores().toString())
             .accumulationPeriod(InstanceMonthlyTotalKey.formatMonthId(remittanceDate))
             .remittancePendingDate(remittanceDate)
             .build();
@@ -335,7 +331,6 @@ class BillableUsageRemittanceRepositoryTest {
 
     var expectedSummary1 =
         RemittanceSummaryProjection.builder()
-            .accountNumber(remittance1.getAccountNumber())
             .accumulationPeriod(
                 getAccumulationPeriod(remittance1.getKey().getRemittancePendingDate()))
             .billingAccountId(remittance1.getKey().getBillingAccountId())
@@ -351,7 +346,6 @@ class BillableUsageRemittanceRepositoryTest {
 
     var expectedSummary2 =
         RemittanceSummaryProjection.builder()
-            .accountNumber(remittance3.getAccountNumber())
             .accumulationPeriod(
                 getAccumulationPeriod(remittance3.getKey().getRemittancePendingDate()))
             .billingAccountId(remittance3.getKey().getBillingAccountId())

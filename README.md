@@ -74,13 +74,11 @@ preferred development workflow.
 
 ### Prerequisites
 
-First, ensure you have podman-compose, podman and java 11 installed:
+First, ensure you have podman-compose, podman and java 17 installed:
 
 ```
 sudo dnf install -y podman-compose podman java-17-openjdk-devel
 ```
-
-*NOTE*: You can also use docker if don't want to or are unable to use podman. Make sure docker and docker-compose are installed.
 
 Ensure the checkout has the HBI submodule initialized:
 
@@ -92,27 +90,9 @@ git submodule update --init --recursive
 
 NOTE: in order to deploy insights-inventory (not always useful), you'll need to login to quay.io first.
 
-*NOTE*: To run any of the following commands using docker,
-
-replace podman-compose with
-
-```
-docker compose
-```
-
-replace podman with
-
-```
-docker
-```
-
 Start via:
 ```
 podman-compose up -d
-```
-If using docker, start via
-```
-docker compose up -d
 ```
 
 *NOTE*: if the DB hasn't finished starting up (likely), HBI will fail to
@@ -142,6 +122,52 @@ consumers:
 These changes are permanent, committed the next time the kafka consumer is detected
 as idle.
 
+### RabbitMQ
+
+Some services like swatch-contracts need an AMQ service to handle the UMB messages. 
+For these services, we can start RabbitMQ as an AMQ service locally via:
+
+```
+podman-compose -f config/rabbitmq/docker-compose.yml up -d
+```
+
+RabbitMQ will be listening on the port 5672.
+
+*NOTE*: Our services might be configured to listen on a different hostname and port. For example, 
+for the SWATCH contracts service, we need to provide the UMB_HOSTNAME and UMB_PORT to point out to RabbitMQ: 
+`java -DUMB_HOSTNAME=localhost -DUMB_PORT=5672 -jar swatch-contracts/build/quarkus-app/quarkus-run.jar`
+
+### Opentelemetry (OTEL) Exporter
+
+Some services export the logging traces to an externalize service via an exporter. 
+Exporters act like a broker to configure what to do with these traces. 
+For local development, we can start an OTEL exporter that simply log the traces into the container logs. 
+We can start it via:
+
+```
+podman-compose -f config/otel/docker-compose.yml up -d
+```
+
+The OTEL exporter will be listening for gRPC connections on port 4317.
+
+*NOTE*: Our services might be configured to listen on a different hostname and port. For example,
+for the SWATCH contracts service, we need to provide the OTEL_ENDPOINT property to point out to the 
+local otel exporter: `java -DOTEL_ENDPOINT=http://localhost:4317 -jar swatch-contracts/build/quarkus-app/quarkus-run.jar`
+
+### Splunk
+
+Some services integrate the log traces into Splunk. For these services, we can start Splunk via:
+
+```
+podman-compose -f config/splunk/docker-compose.yml up -d
+```
+
+Splunk will be listening on port 8088. 
+
+*NOTE*: We need to configure our services to work with this Splunk instance. For example,
+for the SWATCH contracts service, we need: 
+`java -DENABLE_SPLUNK_HEC=false -DSPLUNK_HEC_URL=https://localhost:8088 -DSPLUNK_HEC_TOKEN=29fe2838-cab6-4d17-a392-37b7b8f41f75 -DSWATCH_SELF_PSK=placeholder -DSPLUNK_DISABLE_CERTIFICATE_VALIDATION=true -jar swatch-contracts/build/quarkus-app/quarkus-run.jar`
+
 ### Build and Run rhsm-subscriptions
 
 ```
@@ -167,21 +193,17 @@ We have a number of profiles. Each profile activates a subset of components in t
 
 - `api`: Run the user-facing API
 - `capacity-ingress`: Run the internal only capacity ingress API
-- `capture-hourly-snapshots`: Run the tally job for hourly snapshots
-- `capture-snapshots`: Run the tally job and exit
 - `kafka-queue`: Run with a kafka queue (instead of the default in-memory queue)
 - `liquibase-only`: Run the Liquibase migrations and stop
 - `rh-marketplace`: Run the worker responsible for processing tally summaries and
   emitting usage to Red Hat Marketplace.
-- `metering-job`: Create metering jobs and place them on the job queue
-- `openshift-metering-worker`: Process OpenShift metering jobs off the job queue
 - `purge-snapshots`: Run the retention job and exit
 - `worker`: Process jobs off the job queue
 
 These can be specified most easily via the `SPRING_PROFILES_ACTIVE` environment variable. For example:
 
 ```
-SPRING_PROFILES_ACTIVE=capture-snapshots,kafka-queue ./gradlew bootRun
+SPRING_PROFILES_ACTIVE=api,kafka-queue ./gradlew bootRun
 ```
 
 Each profile has a `@Configuration` class that controls which components get activated, See ApplicationConfiguration for more details.
@@ -190,9 +212,7 @@ If no profiles are specified, the default profiles list in `application.yaml` is
 
 ### Deployment Notes
 
-RHSM Subscriptions is meant to be deployed under the context path "/". The
-location of app specific resources are then controlled by the
-`rhsm-subscriptions.package_uri_mappings.org.candlepin.insights` property.
+RHSM Subscriptions is meant to be deployed under the context path "/".
 This unusual configuration is due to external requirements that our
 application base its context path on the value of an environment
 variable. Using "/" as the context path means that we can have certain
@@ -262,8 +282,6 @@ RHSM_RBAC_USE_STUB=true ./gradlew bootRun
 * `KAFKA_GROUP_ID` kafka consumer group ID
 * `KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS`: kafka max poll interval in milliseconds
 * `KAFKA_MESSAGE_THREADS`: number of consumer threads
-* `KAFKA_BOOTSTRAP_HOST`: kafka bootstrap host
-* `KAFKA_BOOTSTRAP_PORT`: kafka boostrap port
 * `KAFKA_CONSUMER_RECONNECT_BACKOFF_MS`: kafka consumer reconnect backoff in milliseconds
 * `KAFKA_CONSUMER_RECONNECT_BACKOFF_MAX_MS`: kafka consumer reconnect max backoff in milliseconds
 * `KAFKA_API_RECONNECT_TIMEOUT_MS`: kafka connection timeout in milliseconds
@@ -464,6 +482,14 @@ cat <<BONFIRE >>  ~/.config/bonfire/config.yaml
       parameters:
         REPLICAS: 1
         swatch-contracts/IMAGE: quay.io/cloudservices/swatch-contracts
+
+    - name: swatch-producer-azure
+      host: local
+      repo: $(pwd)/rhsm-subscriptions/swatch-producer-azure
+      path: /deploy/clowdapp.yaml
+      parameters:
+        REPLICAS: 1
+        swatch-producer-azure/IMAGE: quay.io/cloudservices/swatch-producer-azure
 BONFIRE
 ```
 
@@ -488,7 +514,7 @@ Cluster" page in the Cloud-dot documentation, but here are some essentials:
 
 * Create an account on `quay.io` and create an image repository for each
   component (Currently, one for rhsm-subscriptions and one for
-  swatch-system-conduit).  Use `podman login` or `docker login` so that you
+  swatch-system-conduit).  Use `podman login` so that you
   can build and push your test images there.
 
 * You can do the builds with the script in `bin/build-images.sh`.
@@ -617,10 +643,10 @@ EOF
 Possibly useful, to extract the JSON from the k8s configmap file:
 
 ```
-oc extract -f dashboards/grafana-dashboard-subscription-watch.configmap.yaml --confirm
+oc extract -f .rhcicd/grafana/grafana-dashboard-subscription-watch.configmap.yaml --confirm
 ```
 
-Once you extract it from the .yaml that's checked into this repo, you can import it into the stage instance of grafana by going to Create -> Import from the left nav.
+Once you extract it from the .yaml that's checked into this repo, you can import it into the stage instance of grafana by going to `Dashboards -> +Import` from the left nav.
 
 ## APIs
 
@@ -640,6 +666,8 @@ Links to Swagger UI and API specs:
   ([source](swatch-contracts/src/main/resources/META-INF/openapi.yaml))
 * [Internal AWS Producer API][aws-api]
   ([source](swatch-producer-aws/src/main/resources/openapi.yaml))
+* [Internal Azure Producer API][azure-api]
+  ([source](swatch-producer-azure/src/main/resources/META-INF/openapi.yaml))
 * [Internal System Conduit API][conduit-api]
   ([source](swatch-system-conduit/src/main/spec/internal-organizations-sync-api-spec.yaml))
 
@@ -651,33 +679,33 @@ Links to Swagger UI and API specs:
 [contracts-api]:      https://petstore.swagger.io/?url=https://raw.githubusercontent.com/RedHatInsights/rhsm-subscriptions/main/swatch-contracts/src/main/resources/META-INF/openapi.yaml
 [aws-api]:            https://petstore.swagger.io/?url=https://raw.githubusercontent.com/RedHatInsights/rhsm-subscriptions/main/swatch-producer-aws/src/main/resources/openapi.yaml
 [conduit-api]:        https://petstore.swagger.io/?url=https://raw.githubusercontent.com/RedHatInsights/rhsm-subscriptions/main/swatch-system-conduit/src/main/spec/internal-organizations-sync-api-spec.yaml
+[azure-api]:          https://petstore.swagger.io/?url=https://raw.githubusercontent.com/RedHatInsights/rhsm-subscriptions/main/swatch-producer-azure/src/main/resources/META-INF/openapi.yaml
 
 ## Kafka topics
 <details>
 <summary>Topics with their associated profiles and pods</summary>
 Service that syncs system data from Hosted Candlepin into HBI.
 
-| profile                   | topic(s)                                       | openshift pod                       |
-| ------------------------- | ---------------------------------------------- | ----------------------------------- |
-| openshift-metering-worker | platform.rhsm-subscriptions.metering-tasks     | swatch-metrics                      |
-| metering-job              | platform.rhsm-subscriptions.metering-tasks     | swatch-metrics-sync                 |
-| orgsync                   | platform.rhsm-conduit.tasks                    | swatch-system-conduit-sync          |
-| orgsync                   | platform.rhsm-conduit.tasks                    | swatch-system-conduit               |
-|                           | platform.inventory.host-ingress                | swatch-system-conduit               |
-| worker                    | platform.rhsm-subscriptions.tasks              | swatch-tally                        |
-| worker                    | platform.rhsm-subscriptions.tally              | swatch-tally                        |
-| worker                    | platform.rhsm-subscriptions.billable-usage     | swatch-tally                        |
-| purge-snapshots           |                                                |                                     |
-| capture-hourly-snapshots  | platform.rhsm-subscriptions.tasks              | swatch-tally-hourly                 |
-| capture-snapshots         | platform.rhsm-subscriptions.tasks              | swatch-tally-tally                  |
-| rh-marketplace            | platform.rhsm-subscriptions.billable-usage     | swatch-producer-red-hat-marketplace |
-|                           | platform.rhsm-subscriptions.billable-usage     | swatch-producer-aws                 |
-| subscription-sync         | platform.rhsm-subscriptions.subscription-sync  | swatch-subscription-sync-sync       |
-| offering-sync             | platform.rhsm-subscriptions.offering-sync      | swatch-subscription-sync-offering   |
-| capacity-ingress          | platform.rhsm-subscriptions.subscription-sync  | swatch-subscriptions-sync           |
-| capacity-ingress          | platform.rhsm-subscriptions.offering-sync      | swatch-subscriptions-sync           |
-| capacity-ingress          | platform.rhsm-subscriptions.capacity-reconcile | swatch-subscriptions-sync           |
-| capacity-ingress          | platform.rhsm-subscriptions.subscription-prune | swatch-subscriptions-sync           |
+| profile          | topic(s)                                             | openshift pod                       |
+|------------------|------------------------------------------------------|-------------------------------------|
+|                  | platform.rhsm-subscriptions.metering-tasks           | swatch-metrics                      |
+|                  | platform.rhsm-subscriptions.service-instance-ingress | swatch-metrics                      |
+|                  | platform.rhsm-subscriptions.metering-rhel-tasks      | swatch-metrics-rhel                 |
+|                  | platform.rhsm-subscriptions.service-instance-ingress | swatch-metrics-rhel                 |
+| orgsync          | platform.rhsm-conduit.tasks                          | swatch-system-conduit-sync          |
+| orgsync          | platform.rhsm-conduit.tasks                          | swatch-system-conduit               |
+|                  | platform.inventory.host-ingress                      | swatch-system-conduit               |
+| worker           | platform.rhsm-subscriptions.tasks                    | swatch-tally                        |
+| worker           | platform.rhsm-subscriptions.tally                    | swatch-tally                        |
+| worker           | platform.rhsm-subscriptions.billable-usage           | swatch-tally                        |
+| worker           | platform.rhsm-subscriptions.service-instance-ingress | swatch-tally                        |
+| purge-snapshots  |                                                      |                                     |
+| rh-marketplace   | platform.rhsm-subscriptions.billable-usage           | swatch-producer-red-hat-marketplace |
+|                  | platform.rhsm-subscriptions.billable-usage           | swatch-producer-aws                 |
+| capacity-ingress | platform.rhsm-subscriptions.subscription-sync        | swatch-subscriptions-sync           |
+| capacity-ingress | platform.rhsm-subscriptions.offering-sync            | swatch-subscriptions-sync           |
+| capacity-ingress | platform.rhsm-subscriptions.capacity-reconcile       | swatch-subscriptions-sync           |
+| capacity-ingress | platform.rhsm-subscriptions.subscription-prune       | swatch-subscriptions-sync           |
 </details>
 
 ## BASILISK (placeholder/testing PAYG product)

@@ -78,9 +78,9 @@ parameters:
   - name: DATABASE_MAX_POOL_SIZE
     value: '25'
   - name: PRODUCT_URL
-    value: https://product.qa.api.redhat.com/svcrest/product/v3
+    value: https://product.stage.api.redhat.com/svcrest/product/v3
   - name: SUBSCRIPTION_URL
-    value: https://subscription.qa.api.redhat.com/svcrest/subscription/v5
+    value: https://subscription.stage.api.redhat.com/svcrest/subscription/v5
   - name: SUBSCRIPTION_MAX_CONNECTIONS
     value: '100'
   - name: SUBSCRIPTION_BACKOFF_INITIAL_INTERVAL
@@ -94,7 +94,7 @@ parameters:
   - name: SUBSCRIPTION_PAGE_SIZE
     value: '500'
   - name: USER_HOST
-    value: 'user.qa.api.redhat.com'
+    value: 'user.stage.api.redhat.com'
   - name: USER_MAX_CONNECTIONS
     value: '100'
   - name: USER_MAX_ATTEMPTS
@@ -135,8 +135,6 @@ parameters:
     value: 'false'
   - name: OTEL_EXPORTER_OTLP_ENDPOINT
     value: 'http://localhost:4317'
-  - name: SWATCH_INTERNAL_SUBSCRIPTION_ENDPOINT
-    value: http://swatch-subscription-sync-service:8000/api/rhsm-subscriptions/v1
 
 objects:
 - apiVersion: cloud.redhat.com/v1alpha1
@@ -147,6 +145,10 @@ objects:
       prometheus: rhsm
   spec:
     envName: ${ENV_NAME}
+    dependencies:
+      - swatch-tally
+      - swatch-subscription-sync
+      - rbac
 
     kafkaTopics:
       - replicas: ${{KAFKA_TALLY_REPLICAS}}
@@ -158,8 +160,6 @@ objects:
 
     database:
       sharedDbAppName: swatch-tally
-    dependencies:
-      - swatch-tally
 
     pullSecrets:
       name: ${IMAGE_PULL_SECRET}
@@ -221,7 +221,7 @@ objects:
             - name: SPLUNK_HEC_TERMINATION_TIMEOUT
               value: ${SPLUNK_HEC_TERMINATION_TIMEOUT}
             - name: SPRING_PROFILES_ACTIVE
-              value: rh-marketplace,kafka-queue
+              value: rh-marketplace,api,kafka-queue
             - name: SERVER_MAX_HTTP_HEADER_SIZE
               value: ${SERVER_MAX_HTTP_HEADER_SIZE}
             - name: LOG_FILE
@@ -366,8 +366,6 @@ objects:
               value: ${OTEL_SERVICE_NAME}
             - name: OTEL_JAVAAGENT_ENABLED
               value: ${OTEL_JAVAAGENT_ENABLED}
-            - name: SWATCH_INTERNAL_SUBSCRIPTION_ENDPOINT
-              value: ${SWATCH_INTERNAL_SUBSCRIPTION_ENDPOINT}
 
           livenessProbe:
             failureThreshold: 3

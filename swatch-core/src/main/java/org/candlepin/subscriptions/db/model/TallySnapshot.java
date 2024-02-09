@@ -20,6 +20,7 @@
  */
 package org.candlepin.subscriptions.db.model;
 
+import com.redhat.swatch.configuration.registry.MetricId;
 import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
 import jakarta.persistence.ElementCollection;
@@ -46,8 +47,6 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 
 /** Model object to represent pieces of tally data. */
 @ToString
@@ -72,9 +71,6 @@ public class TallySnapshot implements Serializable {
 
   @Column(name = "org_id")
   private String orgId;
-
-  @Column(name = "account_number")
-  private String accountNumber;
 
   @Builder.Default
   @Column(name = "sla")
@@ -102,96 +98,18 @@ public class TallySnapshot implements Serializable {
   @Builder.Default
   private Map<TallyMeasurementKey, Double> tallyMeasurements = new HashMap<>();
 
-  public int getMeasurementAsInteger(HardwareMeasurementType type, Measurement.Uom uom) {
+  public int getMeasurementAsInteger(HardwareMeasurementType type, MetricId uom) {
     return Optional.ofNullable(getMeasurement(type, uom)).map(Double::intValue).orElse(0);
   }
 
-  public Double getMeasurement(HardwareMeasurementType type, Measurement.Uom uom) {
-    TallyMeasurementKey key = new TallyMeasurementKey(type, uom);
+  public Double getMeasurement(HardwareMeasurementType type, MetricId metricId) {
+    TallyMeasurementKey key = new TallyMeasurementKey(type, metricId.getValue());
     return getTallyMeasurements().get(key);
   }
 
-  public void setMeasurement(HardwareMeasurementType type, Measurement.Uom uom, Double value) {
-    TallyMeasurementKey key = new TallyMeasurementKey(type, uom);
+  public void setMeasurement(HardwareMeasurementType type, MetricId metricId, Double value) {
+    TallyMeasurementKey key = new TallyMeasurementKey(type, metricId.getValue());
     tallyMeasurements.put(key, value);
-  }
-
-  public org.candlepin.subscriptions.utilization.api.model.TallySnapshot asApiSnapshot() {
-    org.candlepin.subscriptions.utilization.api.model.TallySnapshot snapshot =
-        new org.candlepin.subscriptions.utilization.api.model.TallySnapshot();
-
-    snapshot.setDate(this.getSnapshotDate());
-    snapshot.setCores(this.getMeasurementAsInteger(HardwareMeasurementType.TOTAL, Uom.CORES));
-    snapshot.setSockets(this.getMeasurementAsInteger(HardwareMeasurementType.TOTAL, Uom.SOCKETS));
-    snapshot.setInstanceCount(
-        this.getMeasurementAsInteger(HardwareMeasurementType.TOTAL, Uom.INSTANCES));
-
-    snapshot.setPhysicalCores(
-        this.getMeasurementAsInteger(HardwareMeasurementType.PHYSICAL, Uom.CORES));
-    snapshot.setPhysicalSockets(
-        this.getMeasurementAsInteger(HardwareMeasurementType.PHYSICAL, Uom.SOCKETS));
-    snapshot.setPhysicalInstanceCount(
-        this.getMeasurementAsInteger(HardwareMeasurementType.PHYSICAL, Uom.INSTANCES));
-
-    // Sum "HYPERVISOR" and "VIRTUAL" records in the short term
-    int totalVirtualCores = 0;
-    int totalVirtualSockets = 0;
-    int totalVirtualInstanceCount = 0;
-
-    totalVirtualCores +=
-        Optional.ofNullable(this.getMeasurement(HardwareMeasurementType.HYPERVISOR, Uom.CORES))
-            .orElse(0.0);
-    totalVirtualSockets +=
-        Optional.ofNullable(this.getMeasurement(HardwareMeasurementType.HYPERVISOR, Uom.SOCKETS))
-            .orElse(0.0);
-    totalVirtualInstanceCount +=
-        Optional.ofNullable(this.getMeasurement(HardwareMeasurementType.HYPERVISOR, Uom.INSTANCES))
-            .orElse(0.0);
-
-    totalVirtualCores +=
-        Optional.ofNullable(this.getMeasurement(HardwareMeasurementType.VIRTUAL, Uom.CORES))
-            .orElse(0.0);
-    totalVirtualSockets +=
-        Optional.ofNullable(this.getMeasurement(HardwareMeasurementType.VIRTUAL, Uom.SOCKETS))
-            .orElse(0.0);
-    totalVirtualInstanceCount +=
-        Optional.ofNullable(this.getMeasurement(HardwareMeasurementType.VIRTUAL, Uom.INSTANCES))
-            .orElse(0.0);
-
-    snapshot.setHypervisorCores(totalVirtualCores);
-    snapshot.setHypervisorSockets(totalVirtualSockets);
-    snapshot.setHypervisorInstanceCount(totalVirtualInstanceCount);
-
-    // Tally up all the cloud providers that we support. We count/store them separately in the DB
-    // so that we can report on each provider if required in the future.
-    int cloudInstances = 0;
-    int cloudCores = 0;
-    int cloudSockets = 0;
-    for (HardwareMeasurementType type : HardwareMeasurementType.getCloudProviderTypes()) {
-      Double measurement = getMeasurement(type, Uom.SOCKETS);
-      if (measurement != null) {
-        cloudInstances +=
-            Optional.ofNullable(getMeasurement(type, Uom.INSTANCES))
-                .map(Double::intValue)
-                .orElse(0);
-        cloudCores +=
-            Optional.ofNullable(getMeasurement(type, Uom.CORES)).map(Double::intValue).orElse(0);
-        cloudSockets +=
-            Optional.ofNullable(getMeasurement(type, Uom.SOCKETS)).map(Double::intValue).orElse(0);
-      }
-    }
-    snapshot.setCloudInstanceCount(cloudInstances);
-    snapshot.setCloudCores(cloudCores);
-    snapshot.setCloudSockets(cloudSockets);
-
-    snapshot.setCoreHours(
-        tallyMeasurements.get(new TallyMeasurementKey(HardwareMeasurementType.TOTAL, Uom.CORES)));
-    snapshot.setInstanceHours(
-        tallyMeasurements.get(
-            new TallyMeasurementKey(HardwareMeasurementType.TOTAL, Uom.INSTANCE_HOURS)));
-
-    snapshot.setHasData(id != null);
-    return snapshot;
   }
 
   @Override
@@ -206,7 +124,6 @@ public class TallySnapshot implements Serializable {
     return Objects.equals(snapshotDate, that.snapshotDate)
         && Objects.equals(productId, that.productId)
         && Objects.equals(orgId, that.orgId)
-        && Objects.equals(accountNumber, that.accountNumber)
         && serviceLevel == that.serviceLevel
         && usage == that.usage
         && granularity == that.granularity
@@ -220,7 +137,6 @@ public class TallySnapshot implements Serializable {
         snapshotDate,
         productId,
         orgId,
-        accountNumber,
         serviceLevel,
         usage,
         granularity,

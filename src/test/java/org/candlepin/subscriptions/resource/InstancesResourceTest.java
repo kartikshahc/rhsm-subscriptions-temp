@@ -20,7 +20,6 @@
  */
 package org.candlepin.subscriptions.resource;
 
-import static org.candlepin.subscriptions.utilization.api.model.ProductId.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,12 +28,18 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.registry.ProductId;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import jakarta.ws.rs.BadRequestException;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.*;
-import org.candlepin.subscriptions.db.AccountConfigRepository;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Optional;
 import org.candlepin.subscriptions.db.HostRepository;
+import org.candlepin.subscriptions.db.OrgConfigRepository;
 import org.candlepin.subscriptions.db.TallyInstanceViewRepository;
 import org.candlepin.subscriptions.db.model.BillingProvider;
 import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
@@ -43,11 +48,16 @@ import org.candlepin.subscriptions.db.model.HostHardwareType;
 import org.candlepin.subscriptions.db.model.InstanceMonthlyTotalKey;
 import org.candlepin.subscriptions.db.model.TallyInstanceView;
 import org.candlepin.subscriptions.db.model.TallyInstanceViewKey;
-import org.candlepin.subscriptions.json.Measurement;
 import org.candlepin.subscriptions.resteasy.PageLinkCreator;
 import org.candlepin.subscriptions.security.WithMockRedHatPrincipal;
-import org.candlepin.subscriptions.tally.AccountListSourceException;
-import org.candlepin.subscriptions.utilization.api.model.*;
+import org.candlepin.subscriptions.utilization.api.model.BillingProviderType;
+import org.candlepin.subscriptions.utilization.api.model.CloudProvider;
+import org.candlepin.subscriptions.utilization.api.model.InstanceData;
+import org.candlepin.subscriptions.utilization.api.model.InstanceMeta;
+import org.candlepin.subscriptions.utilization.api.model.InstanceResponse;
+import org.candlepin.subscriptions.utilization.api.model.ReportCategory;
+import org.candlepin.subscriptions.utilization.api.model.ServiceLevelType;
+import org.candlepin.subscriptions.utilization.api.model.UsageType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -55,24 +65,29 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.data.domain.PageImpl;
+import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 import org.springframework.test.context.ActiveProfiles;
 
 @SpringBootTest
 @ActiveProfiles({"api", "test"})
-@WithMockRedHatPrincipal("123456")
 class InstancesResourceTest {
+
+  private static final ProductId ROSA = ProductId.fromString("rosa");
+  private static final ProductId RHEL_FOR_X86 = ProductId.fromString("RHEL for x86");
+  private static final String SORT_BY_DISPLAY_NAME = "display_name";
 
   @MockBean TallyInstanceViewRepository repository;
   @MockBean HostRepository hostRepository;
   @MockBean PageLinkCreator pageLinkCreator;
-  @MockBean AccountConfigRepository accountConfigRepository;
+  @MockBean OrgConfigRepository orgConfigRepository;
   @Autowired InstancesResource resource;
 
   @BeforeEach
-  public void setup() throws AccountListSourceException {
-    when(accountConfigRepository.existsByOrgId("owner123456")).thenReturn(true);
+  public void setup() {
+    when(orgConfigRepository.existsByOrgId("owner123456")).thenReturn(true);
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testShouldPopulateInstanceResponse() {
     BillingProvider expectedBillingProvider = BillingProvider.AWS;
@@ -86,7 +101,7 @@ class InstancesResourceTest {
     tallyInstanceView.getKey().setInstanceId("d6214a0b-b344-4778-831c-d53dcacb2da3");
     tallyInstanceView.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceView.getKey().setMeasurementType(HardwareMeasurementType.VIRTUAL);
-    tallyInstanceView.getKey().setUom(Measurement.Uom.SOCKETS);
+    tallyInstanceView.getKey().setMetricId(MetricIdUtils.getSockets().toString());
 
     Mockito.when(
             repository.findAllBy(
@@ -105,20 +120,17 @@ class InstancesResourceTest {
                 any()))
         .thenReturn(new PageImpl<>(List.of(tallyInstanceView)));
 
-    var expectUom =
-        List.of(
-            "Instance-hours", "Storage-gibibyte-months", "Storage-gibibytes", "Transfer-gibibytes");
+    var expectUom = List.of("Cores", "Instance-hours");
     List<Double> expectedMeasurement = new ArrayList<>();
     String month = InstanceMonthlyTotalKey.formatMonthId(tallyInstanceView.getLastSeen());
     for (String uom : expectUom) {
       expectedMeasurement.add(
-          Optional.ofNullable(
-                  tallyInstanceView.getMonthlyTotal(month, Measurement.Uom.fromValue(uom)))
+          Optional.ofNullable(tallyInstanceView.getMonthlyTotal(month, MetricId.fromString(uom)))
               .orElse(0.0));
     }
     var data = new InstanceData();
     data.setId("testHostId");
-    data.setInstanceId(tallyInstanceView.getKey().getInstanceId().toString());
+    data.setInstanceId(tallyInstanceView.getKey().getInstanceId());
     data.setDisplayName(tallyInstanceView.getDisplayName());
     data.setBillingProvider(expectedBillingProvider.asOpenApiEnum());
     data.setLastSeen(tallyInstanceView.getLastSeen());
@@ -128,7 +140,7 @@ class InstancesResourceTest {
 
     var meta = new InstanceMeta();
     meta.setCount(1);
-    meta.setProduct(ProductId.RHOSAK);
+    meta.setProduct(ROSA.toString());
     meta.setServiceLevel(ServiceLevelType.PREMIUM);
     meta.setUsage(UsageType.PRODUCTION);
     meta.setMeasurements(expectUom);
@@ -140,7 +152,7 @@ class InstancesResourceTest {
 
     InstanceResponse report =
         resource.getInstancesByProduct(
-            RHOSAK,
+            ROSA,
             null,
             null,
             ServiceLevelType.PREMIUM,
@@ -152,12 +164,13 @@ class InstancesResourceTest {
             null,
             null,
             null,
-            InstanceReportSort.DISPLAY_NAME,
+            SORT_BY_DISPLAY_NAME,
             null);
 
     assertEquals(expected, report);
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testShouldPopulateInstanceResponseWithHypervisorAndPhysical() {
     BillingProvider expectedBillingProvider = BillingProvider.RED_HAT;
@@ -170,7 +183,7 @@ class InstancesResourceTest {
     tallyInstanceViewPhysical.getKey().setInstanceId("d6214a0b-b344-4778-831c-d53dcacb2da3");
     tallyInstanceViewPhysical.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceViewPhysical.getKey().setMeasurementType(HardwareMeasurementType.PHYSICAL);
-    tallyInstanceViewPhysical.getKey().setUom(Measurement.Uom.SOCKETS);
+    tallyInstanceViewPhysical.getKey().setMetricId(MetricIdUtils.getSockets().toString());
     tallyInstanceViewPhysical.setValue(4.0);
     // Measurement should come from sockets value
     tallyInstanceViewPhysical.setSockets(2);
@@ -183,7 +196,7 @@ class InstancesResourceTest {
     tallyInstanceViewHypervisor.getKey().setInstanceId("d6214a0bb3444778831cd53dcacb2da3");
     tallyInstanceViewHypervisor.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceViewHypervisor.getKey().setMeasurementType(HardwareMeasurementType.HYPERVISOR);
-    tallyInstanceViewHypervisor.getKey().setUom(Measurement.Uom.SOCKETS);
+    tallyInstanceViewHypervisor.getKey().setMetricId(MetricIdUtils.getSockets().toString());
     tallyInstanceViewHypervisor.setValue(8.0);
     // Measurement should come from sockets value
     tallyInstanceViewHypervisor.setSockets(4);
@@ -226,7 +239,7 @@ class InstancesResourceTest {
 
     var meta = new InstanceMeta();
     meta.setCount(2);
-    meta.setProduct(RHEL);
+    meta.setProduct(RHEL_FOR_X86.toString());
     meta.setServiceLevel(ServiceLevelType.PREMIUM);
     meta.setUsage(UsageType.PRODUCTION);
     meta.setBillingProvider(expectedBillingProvider.asOpenApiEnum());
@@ -238,7 +251,7 @@ class InstancesResourceTest {
 
     InstanceResponse report =
         resource.getInstancesByProduct(
-            RHEL,
+            RHEL_FOR_X86,
             null,
             null,
             ServiceLevelType.PREMIUM,
@@ -250,12 +263,13 @@ class InstancesResourceTest {
             null,
             null,
             null,
-            InstanceReportSort.DISPLAY_NAME,
+            SORT_BY_DISPLAY_NAME,
             null);
 
     assertEquals(expected, report);
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testShouldPopulateCategoryWithCloud() {
     BillingProvider expectedBillingProvider = BillingProvider.AWS;
@@ -268,13 +282,14 @@ class InstancesResourceTest {
     tallyInstanceView.getKey().setInstanceId("d6214a0b-b344-4778-831c-d53dcacb2da3");
     tallyInstanceView.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceView.getKey().setMeasurementType(HardwareMeasurementType.AWS);
-    tallyInstanceView.getKey().setUom(Measurement.Uom.CORE_SECONDS);
+    tallyInstanceView.getKey().setMetricId(MetricIdUtils.getCores().getValue());
 
     String month = InstanceMonthlyTotalKey.formatMonthId(tallyInstanceView.getLastSeen());
 
     // Measurement should come from instance_monthly_totals
     var monthlyTotalMap = new HashMap<InstanceMonthlyTotalKey, Double>();
-    monthlyTotalMap.put(new InstanceMonthlyTotalKey(month, Measurement.Uom.INSTANCE_HOURS), 5.0);
+    monthlyTotalMap.put(
+        new InstanceMonthlyTotalKey(month, MetricIdUtils.getInstanceHours().toString()), 5.0);
     tallyInstanceView.setMonthlyTotals(monthlyTotalMap);
 
     Mockito.when(
@@ -294,31 +309,23 @@ class InstancesResourceTest {
                 any()))
         .thenReturn(new PageImpl<>(List.of(tallyInstanceView)));
 
-    var expectUom =
-        List.of(
-            "Instance-hours", "Storage-gibibyte-months", "Storage-gibibytes", "Transfer-gibibytes");
-    List<Double> expectedMeasurement = new ArrayList<>();
-    expectedMeasurement.add(5.0);
-    expectedMeasurement.add(0.0);
-    expectedMeasurement.add(0.0);
-    expectedMeasurement.add(0.0);
     var data = new InstanceData();
     data.setId(tallyInstanceView.getId());
-    data.setInstanceId(tallyInstanceView.getKey().getInstanceId().toString());
+    data.setInstanceId(tallyInstanceView.getKey().getInstanceId());
     data.setDisplayName(tallyInstanceView.getDisplayName());
     data.setBillingProvider(expectedBillingProvider.asOpenApiEnum());
     data.setLastSeen(tallyInstanceView.getLastSeen());
-    data.setMeasurements(expectedMeasurement);
+    data.setMeasurements(List.of(0.0, 5.0));
     data.setNumberOfGuests(tallyInstanceView.getNumOfGuests());
     data.setCloudProvider(CloudProvider.AWS);
     data.setCategory(ReportCategory.CLOUD);
 
     var meta = new InstanceMeta();
     meta.setCount(1);
-    meta.setProduct(ProductId.RHOSAK);
+    meta.setProduct(ROSA.toString());
     meta.setServiceLevel(ServiceLevelType.PREMIUM);
     meta.setUsage(UsageType.PRODUCTION);
-    meta.setMeasurements(expectUom);
+    meta.setMeasurements(List.of("Cores", "Instance-hours"));
     meta.setBillingProvider(expectedBillingProvider.asOpenApiEnum());
 
     var expected = new InstanceResponse();
@@ -327,7 +334,7 @@ class InstancesResourceTest {
 
     InstanceResponse report =
         resource.getInstancesByProduct(
-            RHOSAK,
+            ROSA,
             null,
             null,
             ServiceLevelType.PREMIUM,
@@ -339,7 +346,7 @@ class InstancesResourceTest {
             null,
             null,
             null,
-            InstanceReportSort.DISPLAY_NAME,
+            SORT_BY_DISPLAY_NAME,
             null);
 
     assertEquals(expected, report);
@@ -351,13 +358,14 @@ class InstancesResourceTest {
     var laterDayInJanuary = OffsetDateTime.of(2023, 1, 29, 10, 0, 0, 0, ZoneOffset.UTC);
     var dayInFebruary = OffsetDateTime.of(2023, 2, 23, 10, 0, 0, 0, ZoneOffset.UTC);
 
-    // RHOSAK is a PAYG product
-    resource.validateBeginningAndEndingDates(RHOSAK, dayInJanuary, laterDayInJanuary);
+    // ROSA is a PAYG product
+    resource.validateBeginningAndEndingDates(ROSA, dayInJanuary, laterDayInJanuary);
     assertThrows(
         BadRequestException.class,
-        () -> resource.validateBeginningAndEndingDates(RHOSAK, dayInJanuary, dayInFebruary));
+        () -> resource.validateBeginningAndEndingDates(ROSA, dayInJanuary, dayInFebruary));
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testCallRepoWithNullMonthForNonPAYGProduct() {
     BillingProvider expectedBillingProvider = BillingProvider.RED_HAT;
@@ -371,7 +379,7 @@ class InstancesResourceTest {
     tallyInstanceView.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceView.getKey().setMeasurementType(HardwareMeasurementType.VIRTUAL);
     tallyInstanceView.getKey().setProductId("RHEL");
-    tallyInstanceView.getKey().setUom(Measurement.Uom.SOCKETS);
+    tallyInstanceView.getKey().setMetricId(MetricIdUtils.getSockets().getValue());
 
     Mockito.when(
             repository.findAllBy(
@@ -391,7 +399,7 @@ class InstancesResourceTest {
         .thenReturn(new PageImpl<>(List.of(tallyInstanceView)));
 
     resource.getInstancesByProduct(
-        RHEL,
+        RHEL_FOR_X86,
         null,
         null,
         ServiceLevelType.PREMIUM,
@@ -403,7 +411,7 @@ class InstancesResourceTest {
         null,
         OffsetDateTime.now(),
         OffsetDateTime.now(),
-        InstanceReportSort.DISPLAY_NAME,
+        SORT_BY_DISPLAY_NAME,
         null);
 
     Mockito.when(
@@ -440,6 +448,7 @@ class InstancesResourceTest {
             any());
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testGetInstanceGuestsReturnInstanceData() {
     var host = new Host();
@@ -457,6 +466,7 @@ class InstancesResourceTest {
     assertEquals(1, response.getData().size());
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testMinCoresOneWhenUomIsCores() {
     BillingProvider expectedBillingProvider = BillingProvider.RED_HAT;
@@ -470,7 +480,7 @@ class InstancesResourceTest {
     tallyInstanceView.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceView.getKey().setMeasurementType(HardwareMeasurementType.VIRTUAL);
     tallyInstanceView.getKey().setProductId("RHEL");
-    tallyInstanceView.getKey().setUom(Measurement.Uom.CORES);
+    tallyInstanceView.getKey().setMetricId(MetricIdUtils.getCores().getValue());
 
     Mockito.when(
             repository.findAllBy(
@@ -490,19 +500,19 @@ class InstancesResourceTest {
         .thenReturn(new PageImpl<>(List.of(tallyInstanceView)));
 
     resource.getInstancesByProduct(
-        RHEL,
+        RHEL_FOR_X86,
         null,
         null,
         ServiceLevelType.PREMIUM,
         UsageType.PRODUCTION,
-        MetricId.CORES,
+        "Cores",
         BillingProviderType.RED_HAT,
         null,
         null,
         null,
         OffsetDateTime.now(),
         OffsetDateTime.now(),
-        InstanceReportSort.DISPLAY_NAME,
+        SORT_BY_DISPLAY_NAME,
         null);
 
     verify(repository)
@@ -522,6 +532,7 @@ class InstancesResourceTest {
             any());
   }
 
+  @WithMockRedHatPrincipal("123456")
   @Test
   void testMinSocketsOneWhenUomIsSockets() {
     BillingProvider expectedBillingProvider = BillingProvider.RED_HAT;
@@ -535,7 +546,7 @@ class InstancesResourceTest {
     tallyInstanceView.setHostBillingProvider(expectedBillingProvider);
     tallyInstanceView.getKey().setMeasurementType(HardwareMeasurementType.VIRTUAL);
     tallyInstanceView.getKey().setProductId("RHEL");
-    tallyInstanceView.getKey().setUom(Measurement.Uom.SOCKETS);
+    tallyInstanceView.getKey().setMetricId(MetricIdUtils.getSockets().getValue());
 
     Mockito.when(
             repository.findAllBy(
@@ -555,19 +566,19 @@ class InstancesResourceTest {
         .thenReturn(new PageImpl<>(List.of(tallyInstanceView)));
 
     resource.getInstancesByProduct(
-        RHEL,
+        RHEL_FOR_X86,
         null,
         null,
         ServiceLevelType.PREMIUM,
         UsageType.PRODUCTION,
-        MetricId.SOCKETS,
+        "Sockets",
         BillingProviderType.RED_HAT,
         null,
         null,
         null,
         OffsetDateTime.now(),
         OffsetDateTime.now(),
-        InstanceReportSort.DISPLAY_NAME,
+        SORT_BY_DISPLAY_NAME,
         null);
 
     verify(repository)
@@ -585,5 +596,57 @@ class InstancesResourceTest {
             any(),
             any(),
             any());
+  }
+
+  @WithMockRedHatPrincipal("123456")
+  @Test
+  void testGetInstancesByProductThrowsExceptionForUnknownMetricId() {
+    assertThrows(
+        BadRequestException.class,
+        () ->
+            resource.getInstancesByProduct(
+                ROSA,
+                null,
+                null,
+                ServiceLevelType.PREMIUM,
+                UsageType.PRODUCTION,
+                "NotAMetricId",
+                BillingProviderType.RED_HAT,
+                null,
+                null,
+                null,
+                null,
+                null,
+                SORT_BY_DISPLAY_NAME,
+                null));
+  }
+
+  @Test
+  void testGetInstancesByProductThrowsAuthenticationCredentialsNotFoundExceptionWhenNoSecurity() {
+    assertThrows(
+        AuthenticationCredentialsNotFoundException.class,
+        () ->
+            resource.getInstancesByProduct(
+                ROSA,
+                null,
+                null,
+                ServiceLevelType.PREMIUM,
+                UsageType.PRODUCTION,
+                "Sockets",
+                BillingProviderType.RED_HAT,
+                null,
+                null,
+                null,
+                null,
+                null,
+                SORT_BY_DISPLAY_NAME,
+                null));
+  }
+
+  @Test
+  void testGetInstanceGuestsThrowsAuthenticationCredentialsNotFoundExceptionWhenNoSecurity() {
+    assertThrows(
+        AuthenticationCredentialsNotFoundException.class,
+        () -> resource.getInstanceGuests("instance123", null, null));
   }
 }

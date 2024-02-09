@@ -20,9 +20,14 @@
  */
 package org.candlepin.subscriptions.tally;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
+import java.math.BigDecimal;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import lombok.AllArgsConstructor;
 import lombok.EqualsAndHashCode;
@@ -34,8 +39,6 @@ import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.TallySnapshot;
 import org.candlepin.subscriptions.db.model.Usage;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 
 /**
  * The calculated usage for a key where key is (productId, sla, usage, billingProvider, and
@@ -73,7 +76,7 @@ public class UsageCalculation {
 
   /** Provides metric totals associated with each hardware type associated with a calculation. */
   public static class Totals {
-    private final Map<Measurement.Uom, Double> measurements = new EnumMap<>(Measurement.Uom.class);
+    private final Map<MetricId, BigDecimal> measurements = new HashMap<>();
 
     public String toString() {
       String entries =
@@ -84,19 +87,18 @@ public class UsageCalculation {
       return String.format("[uom_measurements: %s]", uomMeasurements);
     }
 
-    public Map<Measurement.Uom, Double> getMeasurements() {
-      return measurements;
+    public Map<MetricId, Double> getMeasurements() {
+      return measurements.entrySet().stream()
+          .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().doubleValue()));
     }
 
-    public Double getMeasurement(Measurement.Uom uom) {
-      return measurements.get(uom);
+    public Double getMeasurement(MetricId uom) {
+      return Optional.ofNullable(measurements.get(uom)).map(BigDecimal::doubleValue).orElse(null);
     }
 
-    public void increment(Measurement.Uom uom, Double amount) {
-      Double existingValue = getMeasurement(uom);
-      double value = existingValue == null ? 0.0 : existingValue;
-      double newValue = value + amount;
-      measurements.put(uom, newValue);
+    public void increment(MetricId uom, Double amount) {
+      BigDecimal value = measurements.getOrDefault(uom, BigDecimal.valueOf(0));
+      measurements.put(uom, value.add(BigDecimal.valueOf(amount)));
     }
   }
 
@@ -131,10 +133,10 @@ public class UsageCalculation {
     return mappedTotals.get(type);
   }
 
-  public void add(HardwareMeasurementType type, Measurement.Uom uom, Double value) {
-    increment(type, uom, value);
+  public void add(HardwareMeasurementType type, MetricId metricId, Double value) {
+    increment(type, metricId, value);
     if (type != HardwareMeasurementType.TOTAL) {
-      addToTotal(uom, value);
+      addToTotal(metricId, value);
     }
   }
 
@@ -143,9 +145,9 @@ public class UsageCalculation {
   }
 
   public void add(HardwareMeasurementType type, Double cores, Double sockets, Double instances) {
-    add(type, Uom.CORES, cores);
-    add(type, Uom.SOCKETS, sockets);
-    add(type, Uom.INSTANCES, instances);
+    add(type, MetricIdUtils.getCores(), cores);
+    add(type, MetricIdUtils.getSockets(), sockets);
+    add(type, MetricIdUtils.getInstanceHours(), instances);
   }
 
   public void addPhysical(int cores, int sockets, int instances) {
@@ -168,7 +170,7 @@ public class UsageCalculation {
     add(HardwareMeasurementType.TOTAL, cores, sockets, instances);
   }
 
-  public void addToTotal(Measurement.Uom uom, Double value) {
+  public void addToTotal(MetricId uom, Double value) {
     increment(HardwareMeasurementType.TOTAL, uom, value);
   }
 
@@ -181,7 +183,7 @@ public class UsageCalculation {
     add(cloudType, cores, sockets, instances);
   }
 
-  private void increment(HardwareMeasurementType type, Measurement.Uom uom, Double value) {
+  private void increment(HardwareMeasurementType type, MetricId uom, Double value) {
     Totals total = getOrDefault(type);
     total.increment(uom, value);
   }

@@ -3,9 +3,6 @@ title: BillableUsage
 required:
   - account_number
 properties:
-  account_number:
-    description: Account identifier for the relevant account.
-    type: string
   org_id:
     description: Preferred identifier for the relevant account (if present).
     type: string
@@ -47,14 +44,6 @@ properties:
   uom:
     description: Preferred unit of measure for the subject (for products with multiple possible UOM).
     type: string
-    enum:
-      - ''  # UNSPECIFIED
-      - Cores
-      - Sockets
-      - Instance-hours
-      - Storage-gibibytes
-      - Transfer-gibibytes
-      - Storage-gibibyte-months
   value:
     description: Measurement value.
     type: number
@@ -64,3 +53,6 @@ properties:
   vendor_product_code:
     description: Field used to specify a unique contract
     type: string
+  hardware_measurement_type:
+    type: string
+    format: string

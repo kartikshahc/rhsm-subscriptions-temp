@@ -25,11 +25,15 @@ import jakarta.validation.constraints.NotNull;
 import lombok.*;
 
 @Data
+@Builder
+@AllArgsConstructor
+@NoArgsConstructor
 public class Metric {
 
   @NotNull @NotEmpty private String id; // required
   private String rhmMetricId;
   private String awsDimension;
+  private String azureDimension;
   private PrometheusMetric prometheus;
   private Double billingFactor;
 }

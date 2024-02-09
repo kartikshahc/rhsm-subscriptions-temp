@@ -16,13 +16,14 @@ DOCKER_CONF="$PWD/.docker"
 mkdir -p "$DOCKER_CONF"
 docker --config="$DOCKER_CONF" login -u="$QUAY_USER" -p="$QUAY_TOKEN" quay.io
 
-USE_DOCKER=true ./podman_run.sh ./gradlew assemble
+# Initialize the GIT config which is required by the Gradle Nebula plugin to build the images
+git config user.name "$(git --no-pager log --format=format:'%an' -n 1)"
+git config user.email "$(git --no-pager log --format=format:'%ae' -n 1)"
 
 for service in $SERVICES; do
   IMAGE="quay.io/cloudservices/$service"
   DOCKERFILE=$(get_dockerfile $service)
-  APP_ROOT=$(get_approot $service)
-  docker --config="$DOCKER_CONF" build --no-cache -t "${IMAGE}:${IMAGE_TAG}" $APP_ROOT -f $APP_ROOT/$(get_dockerfile $service)
+  docker --config="$DOCKER_CONF" build --ulimit nofile=2048:2048 -t "${IMAGE}:${IMAGE_TAG}" $PWD -f $PWD/$(get_dockerfile $service)
   docker --config="$DOCKER_CONF" push "${IMAGE}:${IMAGE_TAG}"
   docker --config="$DOCKER_CONF" tag "${IMAGE}:${IMAGE_TAG}" "${IMAGE}:${SMOKE_TEST_TAG}"
   docker --config="$DOCKER_CONF" push "${IMAGE}:${SMOKE_TEST_TAG}"

@@ -20,6 +20,8 @@
  */
 package org.candlepin.subscriptions.db.model;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import jakarta.persistence.CascadeType;
 import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
@@ -33,13 +35,11 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.MapKeyColumn;
-import jakarta.persistence.MapKeyEnumerated;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import jakarta.validation.constraints.NotNull;
 import java.io.Serializable;
 import java.time.OffsetDateTime;
-import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -50,8 +50,6 @@ import java.util.UUID;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 
 /**
  * Represents a reported Host from inventory. This entity stores normalized facts for a Host
@@ -82,9 +80,6 @@ public class Host implements Serializable {
   @Column(name = "display_name", nullable = false)
   private String displayName;
 
-  @Column(name = "account_number", nullable = false)
-  private String accountNumber;
-
   @NotNull
   @Column(name = "org_id")
   private String orgId;
@@ -94,10 +89,9 @@ public class Host implements Serializable {
 
   @ElementCollection(fetch = FetchType.EAGER)
   @CollectionTable(name = "instance_measurements", joinColumns = @JoinColumn(name = "host_id"))
-  @MapKeyEnumerated(EnumType.STRING)
-  @MapKeyColumn(name = "uom")
+  @MapKeyColumn(name = "metric_id")
   @Column(name = "value")
-  private Map<Measurement.Uom, Double> measurements = new EnumMap<>(Measurement.Uom.class);
+  private Map<String, Double> measurements = new HashMap<>();
 
   @ElementCollection(fetch = FetchType.EAGER)
   @CollectionTable(name = "instance_monthly_totals", joinColumns = @JoinColumn(name = "host_id"))
@@ -152,23 +146,21 @@ public class Host implements Serializable {
 
   public Host() {}
 
-  public Host(
-      String inventoryId, String insightsId, String accountNumber, String orgId, String subManId) {
+  public Host(String inventoryId, String insightsId, String orgId, String subManId) {
     this.instanceType = "HBI_HOST";
     this.inventoryId = inventoryId;
     this.instanceId = inventoryId;
     this.insightsId = insightsId;
-    this.accountNumber = accountNumber;
     this.orgId = orgId;
     this.subscriptionManagerId = subManId;
   }
 
-  public Double getMeasurement(Measurement.Uom uom) {
-    return measurements.get(uom);
+  public Double getMeasurement(String metricId) {
+    return measurements.get(MetricIdUtils.toUpperCaseFormatted(metricId));
   }
 
-  public void setMeasurement(Measurement.Uom uom, Double value) {
-    measurements.put(uom, value);
+  public void setMeasurement(String metricId, Double value) {
+    measurements.put(MetricIdUtils.toUpperCaseFormatted(metricId), value);
   }
 
   public HostTallyBucket addBucket( // NOSONAR
@@ -220,24 +212,19 @@ public class Host implements Serializable {
     getBuckets().remove(bucket);
   }
 
-  public Double getMonthlyTotal(String monthId, Measurement.Uom uom) {
-    var key = new InstanceMonthlyTotalKey(monthId, uom);
+  public Double getMonthlyTotal(String monthId, MetricId metricId) {
+    var key = new InstanceMonthlyTotalKey(monthId, metricId.getValue());
     return monthlyTotals.get(key);
   }
 
-  public Double getMonthlyTotal(OffsetDateTime reference, Measurement.Uom uom) {
-    var key = new InstanceMonthlyTotalKey(reference, uom);
-    return monthlyTotals.get(key);
-  }
-
-  public void addToMonthlyTotal(String monthId, Measurement.Uom uom, Double value) {
-    var key = new InstanceMonthlyTotalKey(monthId, uom);
+  public void addToMonthlyTotal(String monthId, MetricId metricId, Double value) {
+    var key = new InstanceMonthlyTotalKey(monthId, metricId.toString());
     Double currentValue = monthlyTotals.getOrDefault(key, 0.0);
     monthlyTotals.put(key, currentValue + value);
   }
 
-  public void addToMonthlyTotal(OffsetDateTime timestamp, Measurement.Uom uom, Double value) {
-    var key = new InstanceMonthlyTotalKey(timestamp, uom);
+  public void addToMonthlyTotal(OffsetDateTime timestamp, MetricId metricId, Double value) {
+    var key = new InstanceMonthlyTotalKey(timestamp, metricId.toString());
     Double currentValue = monthlyTotals.getOrDefault(key, 0.0);
     monthlyTotals.put(key, currentValue + value);
   }
@@ -263,9 +250,14 @@ public class Host implements Serializable {
 
   public org.candlepin.subscriptions.utilization.api.model.Host asApiHost() {
     return new org.candlepin.subscriptions.utilization.api.model.Host()
-        .cores(Optional.ofNullable(getMeasurement(Uom.CORES)).map(Double::intValue).orElse(null))
+        .cores(
+            Optional.ofNullable(getMeasurement(MetricIdUtils.getCores().getValue()))
+                .map(Double::intValue)
+                .orElse(null))
         .sockets(
-            Optional.ofNullable(getMeasurement(Uom.SOCKETS)).map(Double::intValue).orElse(null))
+            Optional.ofNullable(getMeasurement(MetricIdUtils.getSockets().getValue()))
+                .map(Double::intValue)
+                .orElse(null))
         .displayName(displayName)
         .hardwareType(hardwareType == null ? null : hardwareType.toString())
         .insightsId(insightsId)
@@ -294,7 +286,6 @@ public class Host implements Serializable {
         && Objects.equals(inventoryId, host.inventoryId)
         && Objects.equals(insightsId, host.insightsId)
         && Objects.equals(displayName, host.displayName)
-        && Objects.equals(accountNumber, host.accountNumber)
         && Objects.equals(orgId, host.orgId)
         && Objects.equals(subscriptionManagerId, host.subscriptionManagerId)
         && Objects.equals(hypervisorUuid, host.hypervisorUuid)
@@ -314,7 +305,6 @@ public class Host implements Serializable {
         inventoryId,
         insightsId,
         displayName,
-        accountNumber,
         orgId,
         subscriptionManagerId,
         guest,
@@ -340,9 +330,12 @@ public class Host implements Serializable {
 
     host.hardwareType(
         Objects.requireNonNullElse(getHardwareType(), HostHardwareType.PHYSICAL).toString());
-    host.cores(Objects.requireNonNullElse(getMeasurement(Measurement.Uom.CORES), 0.0).intValue());
+    host.cores(
+        Objects.requireNonNullElse(getMeasurement(MetricIdUtils.getCores().getValue()), 0.0)
+            .intValue());
     host.sockets(
-        Objects.requireNonNullElse(getMeasurement(Measurement.Uom.SOCKETS), 0.0).intValue());
+        Objects.requireNonNullElse(getMeasurement(MetricIdUtils.getSockets().getValue()), 0.0)
+            .intValue());
 
     host.displayName(getDisplayName());
     host.subscriptionManagerId(getSubscriptionManagerId());
@@ -370,8 +363,8 @@ public class Host implements Serializable {
     // granularity of that API changes in the future, other work will have to be done first to
     // capture relationships between hosts & snapshots to derive coreHours within dynamic timeframes
 
-    host.coreHours(getMonthlyTotal(monthId, Uom.CORES));
-    host.instanceHours(getMonthlyTotal(monthId, Uom.INSTANCE_HOURS));
+    host.coreHours(getMonthlyTotal(monthId, MetricIdUtils.getCores()));
+    host.instanceHours(getMonthlyTotal(monthId, MetricIdUtils.getInstanceHours()));
 
     return host;
   }

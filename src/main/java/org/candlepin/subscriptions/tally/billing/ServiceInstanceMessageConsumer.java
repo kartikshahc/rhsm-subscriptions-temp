@@ -20,7 +20,7 @@
  */
 package org.candlepin.subscriptions.tally.billing;
 
-import java.util.Set;
+import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.candlepin.subscriptions.event.EventController;
 import org.candlepin.subscriptions.task.TaskQueueProperties;
@@ -54,8 +54,8 @@ public class ServiceInstanceMessageConsumer extends SeekableKafkaConsumer {
       topics = "#{__listener.topic}",
       containerFactory = "kafkaServiceInstanceListenerContainerFactory")
   @Transactional(noRollbackFor = RuntimeException.class)
-  public void receive(@Payload Set<String> eventRecords) {
-    log.info("Events received w/ event list size={}. Consuming events.", eventRecords.size());
-    eventController.persistServiceInstances(eventRecords);
+  public void receive(@Payload List<String> events) {
+    log.info("Events received w/ event list size={}. Consuming events.", events.size());
+    eventController.persistServiceInstances(events);
   }
 }

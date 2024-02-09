@@ -21,16 +21,26 @@
 package org.candlepin.subscriptions.subscription;
 
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.*;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.matchesPattern;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.ws.rs.BadRequestException;
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -41,26 +51,24 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.capacity.CapacityReconciliationController;
 import org.candlepin.subscriptions.capacity.files.ProductDenylist;
 import org.candlepin.subscriptions.db.OfferingRepository;
+import org.candlepin.subscriptions.db.OrgConfigRepository;
 import org.candlepin.subscriptions.db.SubscriptionRepository;
 import org.candlepin.subscriptions.db.model.BillingProvider;
 import org.candlepin.subscriptions.db.model.Offering;
-import org.candlepin.subscriptions.db.model.OrgConfigRepository;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.Subscription;
 import org.candlepin.subscriptions.db.model.Usage;
 import org.candlepin.subscriptions.exception.MissingOfferingException;
 import org.candlepin.subscriptions.product.OfferingSyncController;
 import org.candlepin.subscriptions.product.SyncResult;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.subscription.api.model.ExternalReference;
 import org.candlepin.subscriptions.subscription.api.model.SubscriptionProduct;
 import org.candlepin.subscriptions.tally.UsageCalculation;
 import org.candlepin.subscriptions.tally.UsageCalculation.Key;
-import org.candlepin.subscriptions.task.TaskQueueProperties;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.utilization.admin.api.model.OfferingProductTags;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -68,7 +76,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -81,8 +88,9 @@ import org.springframework.test.context.ActiveProfiles;
 class SubscriptionSyncControllerTest {
 
   private static final OffsetDateTime NOW = OffsetDateTime.now();
-  public static final String BILLING_ACCOUNT_ID_ANY = "_ANY";
-  public static final String PAYG_PRODUCT_NAME = "OpenShift Dedicated";
+  private static final String SKU = "testsku";
+  private static final String BILLING_ACCOUNT_ID_ANY = "_ANY";
+  private static final String PAYG_PRODUCT_NAME = "OpenShift Dedicated";
 
   @Autowired SubscriptionSyncController subscriptionSyncController;
 
@@ -104,38 +112,30 @@ class SubscriptionSyncControllerTest {
 
   @MockBean KafkaTemplate<String, SyncSubscriptionsTask> subscriptionsKafkaTemplate;
 
-  @MockBean private TagProfile mockProfile;
-
   @Captor ArgumentCaptor<Iterable<Subscription>> subscriptionsCaptor;
 
   private OffsetDateTime rangeStart = OffsetDateTime.now().minusDays(5);
   private OffsetDateTime rangeEnd = OffsetDateTime.now().plusDays(5);
 
-  @Autowired
-  @Qualifier("syncSubscriptionTasks")
-  private TaskQueueProperties taskQueueProperties;
-
   @BeforeEach
   void setUp() {
     var offering =
         Offering.builder()
-            .sku("testsku")
+            .sku(SKU)
             .productName("RHEL")
             .productIds(new HashSet<>(List.of(68)))
             .build();
-    Mockito.when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    Mockito.when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
   }
 
   @Test
   void shouldCreateNewRecordOnQuantityChange() {
-    Mockito.when(subscriptionRepository.findActiveSubscription(Mockito.anyString()))
-        .thenReturn(Optional.of(createSubscription("123", "testsku", "456")));
-    Mockito.when(offeringRepository.existsById("testsku")).thenReturn(true);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    Mockito.when(offeringRepository.existsById(SKU)).thenReturn(true);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
     when(denylist.productIdMatches(any())).thenReturn(false);
     var dto = createDto("456", 10);
-    subscriptionSyncController.syncSubscription(dto);
+    subscriptionSyncController.syncSubscription(dto, Optional.of(createSubscription()));
     verify(subscriptionRepository, Mockito.times(2)).save(Mockito.any(Subscription.class));
     verify(capacityReconciliationController, Mockito.times(2))
         .reconcileCapacityForSubscription(Mockito.any(Subscription.class));
@@ -143,14 +143,12 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void shouldUpdateRecordOnNoQuantityChange() {
-    Mockito.when(subscriptionRepository.findActiveSubscription(Mockito.anyString()))
-        .thenReturn(Optional.of(createSubscription("123", "testsku", "456")));
-    Mockito.when(offeringRepository.existsById("testsku")).thenReturn(true);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    Mockito.when(offeringRepository.existsById(SKU)).thenReturn(true);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
     when(denylist.productIdMatches(any())).thenReturn(false);
     var dto = createDto("456", 4);
-    subscriptionSyncController.syncSubscription(dto);
+    subscriptionSyncController.syncSubscription(dto, Optional.of(createSubscription()));
     verify(subscriptionRepository, Mockito.times(1)).save(Mockito.any(Subscription.class));
     verify(capacityReconciliationController, Mockito.times(2))
         .reconcileCapacityForSubscription(Mockito.any(Subscription.class));
@@ -158,56 +156,56 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void shouldCreateNewRecordOnNotFound() {
-    Mockito.when(subscriptionRepository.findActiveSubscription(Mockito.anyString()))
-        .thenReturn(Optional.empty());
-    Mockito.when(offeringRepository.existsById("testsku")).thenReturn(true);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    Mockito.when(offeringRepository.existsById(SKU)).thenReturn(true);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
     when(denylist.productIdMatches(any())).thenReturn(false);
     var dto = createDto("456", 10);
-    subscriptionSyncController.syncSubscription(dto);
+    subscriptionSyncController.syncSubscription(dto, Optional.empty());
     verify(subscriptionRepository, Mockito.times(1)).save(Mockito.any(Subscription.class));
     verify(capacityReconciliationController)
         .reconcileCapacityForSubscription(Mockito.any(Subscription.class));
   }
 
   @Test
-  void shouldSyncSubscriptionFromServiceForASubscriptionID() {
-    Offering offering = Offering.builder().sku("testSku").build();
-    Subscription s = createSubscription("123", "testsku", "456");
-    s.setOffering(offering);
-    Mockito.when(subscriptionRepository.findActiveSubscription(Mockito.anyString()))
-        .thenReturn(Optional.of(s));
-    var dto = createDto("456", 10);
-    Mockito.when(subscriptionService.getSubscriptionById("456")).thenReturn(dto);
-    subscriptionSyncController.syncSubscription(dto.getId().toString());
-    verify(subscriptionService).getSubscriptionById(Mockito.anyString());
-  }
-
-  @Test
   void shouldSkipSyncSubscriptionIfSkuIsOnDenyList() {
-    when(denylist.productIdMatches(any())).thenReturn(true);
-    var dto = createDto("456", 10);
-    Mockito.when(subscriptionService.getSubscriptionById("456")).thenReturn(dto);
-    subscriptionSyncController.syncSubscription(dto.getId().toString());
+    String sku = "MW0001";
+    when(denylist.productIdMatches(sku)).thenReturn(true);
+    subscriptionSyncController.syncSubscription(sku, new Subscription(), Optional.empty());
     verify(subscriptionRepository, never()).save(any());
   }
 
   @Test
   void shouldSkipSyncSubscriptionIfSkuIsNotInOfferingRepository() {
-    when(denylist.productIdMatches(any())).thenReturn(false);
-    var dto = createDto("456", 10);
-    Mockito.when(subscriptionService.getSubscriptionById("456")).thenReturn(dto);
-    subscriptionSyncController.syncSubscription(dto.getId().toString());
+    String sku = "MW0001";
+    when(denylist.productIdMatches(sku)).thenReturn(false);
+    when(offeringRepository.existsById(sku)).thenReturn(false);
+    subscriptionSyncController.syncSubscription(sku, new Subscription(), Optional.empty());
     verify(subscriptionRepository, never()).save(any());
+  }
+
+  @Test
+  void shouldUpdateSubscriptionWhenUpdateProductIds() {
+    var dto = createDto(123, "456", 4);
+    givenOfferingWithProductIds(290);
+    subscriptionSyncController.syncSubscription(dto, Optional.empty());
+    verify(subscriptionRepository).save(any());
+    verify(capacityReconciliationController).reconcileCapacityForSubscription(any());
+
+    // let's update only the product IDs
+    givenOfferingWithProductIds(290, 69);
+    reset(subscriptionRepository, capacityReconciliationController);
+    subscriptionSyncController.syncSubscription(dto, Optional.empty());
+    verify(subscriptionRepository).save(any());
+    verify(capacityReconciliationController).reconcileCapacityForSubscription(any());
   }
 
   @Test
   void shouldSyncSubscriptionsSyncSubIfRecent() {
     when(denylist.productIdMatches(any())).thenReturn(false);
     Mockito.when(offeringRepository.existsById(any())).thenReturn(true);
-    Mockito.when(offeringRepository.getReferenceById("testsku"))
-        .thenReturn(Offering.builder().sku("testsku").productName("RHEL").build());
+    Mockito.when(offeringRepository.getReferenceById(SKU))
+        .thenReturn(Offering.builder().sku(SKU).productName("RHEL").build());
 
     // When syncing an org's subs, a sub should be synced if it is within effective*Dates
     var dto = createDto("456", 10);
@@ -287,12 +285,30 @@ class SubscriptionSyncControllerTest {
   void shouldSaveSubscriptionToDatabaseAndReconcile() throws JsonProcessingException {
     ObjectMapper mapper = new ObjectMapper();
     var subscription = createDto("123", 1);
+    var offer = Offering.builder().sku("test").build();
     String subscriptionsJson =
         mapper.writeValueAsString(
             new org.candlepin.subscriptions.subscription.api.model.Subscription[] {subscription});
+    when(offeringRepository.findOfferingBySku(any())).thenReturn(offer);
     subscriptionSyncController.saveSubscriptions(subscriptionsJson, true);
     verify(subscriptionRepository).save(any());
     verify(capacityReconciliationController).reconcileCapacityForSubscription(any());
+  }
+
+  @Test
+  void shouldHandleSubscriptionWithoutOffering() throws JsonProcessingException {
+    ObjectMapper mapper = new ObjectMapper();
+    var subscription = createDto("123", 1);
+    String subscriptionsJson =
+        mapper.writeValueAsString(
+            new org.candlepin.subscriptions.subscription.api.model.Subscription[] {subscription});
+    var thrown =
+        assertThrows(
+            BadRequestException.class,
+            () -> {
+              subscriptionSyncController.saveSubscriptions(subscriptionsJson, true);
+            });
+    assertEquals("Error offering doesn't exist", thrown.getMessage());
   }
 
   @Test
@@ -398,167 +414,100 @@ class SubscriptionSyncControllerTest {
 
     assertThrows(
         IllegalArgumentException.class,
-        () ->
-            subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-                "1000", orgId, key1, rangeStart, rangeEnd, false));
+        () -> subscriptionSyncController.findSubscriptions(orgId, key1, rangeStart, rangeEnd));
     assertThrows(
         IllegalArgumentException.class,
-        () ->
-            subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-                "1000", orgId, key2, rangeStart, rangeEnd, false));
+        () -> subscriptionSyncController.findSubscriptions(orgId, key2, rangeStart, rangeEnd));
   }
 
   @Test
-  void findsSubscriptionId_WhenBothOrgIdAndAccountNumberPresent() {
+  void findsSubscriptionId_WhenOrgIdPresent() {
     UsageCalculation.Key key =
         new Key(
-            String.valueOf(1),
+            "OpenShift-metrics",
             ServiceLevel.STANDARD,
             Usage.PRODUCTION,
             BillingProvider.RED_HAT,
             "xyz");
-    Subscription s = new Subscription();
+    Subscription s = createSubscription("org123", "sku", "foo");
+    s.getOffering().setProductName("OpenShift Container Platform");
     s.setStartDate(OffsetDateTime.now().minusDays(7));
     s.setEndDate(OffsetDateTime.now().plusDays(7));
     s.setBillingProvider(BillingProvider.RED_HAT);
     s.setBillingProviderId("xyz");
     List<Subscription> result = Collections.singletonList(s);
 
-    Set<String> productNames = Set.of("OpenShift Container Platform");
-    when(mockProfile.getOfferingProductNamesForTag(any())).thenReturn(productNames);
-    when(subscriptionRepository.findByCriteria(any(), any()))
-        .thenReturn(new ArrayList<>())
-        .thenReturn(result);
+    when(subscriptionRepository.findByCriteria(any(), any())).thenReturn(result);
 
     List<Subscription> actual =
-        subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-            "1000", Optional.of("org1000"), key, rangeStart, rangeEnd, false);
-    assertEquals(1, actual.size());
-    assertEquals("xyz", actual.get(0).getBillingProviderId());
-  }
-
-  @Test
-  void findsSubscriptionId_WhenOrgIdPresentAndAccountNumberAbsent() {
-    UsageCalculation.Key key =
-        new Key(
-            String.valueOf(1),
-            ServiceLevel.STANDARD,
-            Usage.PRODUCTION,
-            BillingProvider.RED_HAT,
-            "xyz");
-    Subscription s = new Subscription();
-    s.setStartDate(OffsetDateTime.now().minusDays(7));
-    s.setEndDate(OffsetDateTime.now().plusDays(7));
-    s.setBillingProvider(BillingProvider.RED_HAT);
-    s.setBillingProviderId("xyz");
-    List<Subscription> result = Collections.singletonList(s);
-
-    Set<String> productNames = Set.of("OpenShift Container Platform");
-    when(mockProfile.getOfferingProductNamesForTag(any())).thenReturn(productNames);
-    when(subscriptionRepository.findByCriteria(any(), any()))
-        .thenReturn(new ArrayList<>())
-        .thenReturn(result);
-
-    List<Subscription> actual =
-        subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-            null, Optional.of("org1000"), key, rangeStart, rangeEnd, false);
-    assertEquals(1, actual.size());
-    assertEquals("xyz", actual.get(0).getBillingProviderId());
-  }
-
-  @Test
-  void findsSubscriptionId_WhenAccountNumberPresentAndOrgIdAbsent() {
-    UsageCalculation.Key key =
-        new Key(
-            String.valueOf(1),
-            ServiceLevel.STANDARD,
-            Usage.PRODUCTION,
-            BillingProvider.RED_HAT,
-            "xyz");
-    Subscription s = new Subscription();
-    s.setStartDate(OffsetDateTime.now().minusDays(7));
-    s.setEndDate(OffsetDateTime.now().plusDays(7));
-    s.setBillingProvider(BillingProvider.RED_HAT);
-    s.setBillingProviderId("xyz");
-    List<Subscription> result = Collections.singletonList(s);
-
-    Set<String> productNames = Set.of("OpenShift Container Platform");
-    when(mockProfile.getOfferingProductNamesForTag(any())).thenReturn(productNames);
-    when(subscriptionRepository.findByCriteria(any(), any()))
-        .thenReturn(new ArrayList<>())
-        .thenReturn(result);
-
-    List<Subscription> actual =
-        subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-            "account123", Optional.empty(), key, rangeStart, rangeEnd, false);
+        subscriptionSyncController.findSubscriptions(
+            Optional.of("org1000"), key, rangeStart, rangeEnd);
     assertEquals(1, actual.size());
     assertEquals("xyz", actual.get(0).getBillingProviderId());
   }
 
   @Test
   void findProductTagsBySku_WhenSkuPresent() {
-    when(offeringRepository.findProductNameBySku("sku")).thenReturn(Optional.of("productname"));
-    when(mockProfile.tagForOfferingProductName("productname")).thenReturn("producttag");
+    Offering offering = new Offering();
+    offering.setRole("ocp");
+    when(offeringRepository.findOfferingBySku("sku")).thenReturn(offering);
 
     OfferingProductTags productTags = subscriptionSyncController.findProductTags("sku");
     assertEquals(1, productTags.getData().size());
-    assertEquals("producttag", productTags.getData().get(0));
+    assertEquals("OpenShift-metrics", productTags.getData().get(0));
+  }
+
+  @Test
+  void
+      findProductTagsBySku_WhenSkuPresentWithNoRoleOrEngIDsThenItShouldUseProductNameWhenMeteredFlagIsTrue() {
+    Offering offering = new Offering();
+    offering.setProductName("OpenShift Online");
+    offering.setRole(null);
+    offering.setProductIds(null);
+    offering.setMetered(true);
+    when(offeringRepository.findOfferingBySku("sku")).thenReturn(offering);
+
+    OfferingProductTags productTags = subscriptionSyncController.findProductTags("sku");
+    assertEquals(1, productTags.getData().size());
+    assertEquals("rosa", productTags.getData().get(0));
+  }
+
+  @Test
+  void
+      findProductTagsBySku_WhenSkuPresentWithNoRoleOrEngIDsThenItShouldNotUseProductNameWhenMeteredFlagIsFalse() {
+    Offering offering = new Offering();
+    offering.setProductName("OpenShift Online");
+    offering.setRole(null);
+    offering.setProductIds(null);
+    offering.setMetered(false);
+    when(offeringRepository.findOfferingBySku("sku")).thenReturn(offering);
+
+    OfferingProductTags productTags = subscriptionSyncController.findProductTags("sku");
+    assertNull(productTags.getData());
   }
 
   @Test
   void findProductTagsBySku_WhenSkuNotPresent() {
-    when(offeringRepository.findProductNameBySku("sku")).thenReturn(Optional.empty());
-    when(mockProfile.tagForOfferingProductName("productname1")).thenReturn("producttag");
+    when(offeringRepository.findOfferingBySku("sku")).thenReturn(null);
     RuntimeException e =
         assertThrows(
             MissingOfferingException.class,
             () -> subscriptionSyncController.findProductTags("sku"));
     assertEquals("Sku sku not found in Offering", e.getMessage());
 
-    when(offeringRepository.findProductNameBySku("sku")).thenReturn(Optional.of("productname"));
-    when(mockProfile.tagForOfferingProductName("productname")).thenReturn(null);
+    when(offeringRepository.findOfferingBySku("sku")).thenReturn(new Offering());
     OfferingProductTags productTags2 = subscriptionSyncController.findProductTags("sku");
     assertNull(productTags2.getData());
   }
 
   @Test
-  void memoizesSubscriptionId() {
-    UsageCalculation.Key key =
-        new Key(
-            String.valueOf(1),
-            ServiceLevel.STANDARD,
-            Usage.PRODUCTION,
-            BillingProvider.RED_HAT,
-            "abc");
-    Subscription s = new Subscription();
-    s.setStartDate(OffsetDateTime.now().minusDays(7));
-    s.setEndDate(OffsetDateTime.now().plusDays(7));
-    s.setBillingProvider(BillingProvider.RED_HAT);
-    s.setBillingProviderId("abc");
-    List<Subscription> result = Collections.singletonList(s);
-
-    Set<String> productNames = Set.of("OpenShift Container Platform");
-    when(mockProfile.getOfferingProductNamesForTag(anyString())).thenReturn(productNames);
-    when(subscriptionRepository.findByCriteria(any(), any()))
-        .thenReturn(new ArrayList<>())
-        .thenReturn(result);
-
-    List<Subscription> actual =
-        subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-            "1000", Optional.of("org1000"), key, rangeStart, rangeEnd, false);
-    assertEquals(1, actual.size());
-    assertEquals("abc", actual.get(0).getBillingProviderId());
-    verify(subscriptionService, times(1)).getSubscriptionsByOrgId("org1000");
-  }
-
-  @Test
   void terminateActivePAYGSubscriptionTest() {
-    Subscription s = createSubscription("123", "testsku", "456");
+    Subscription s = createSubscription();
     Offering o = new Offering();
     o.setProductName(PAYG_PRODUCT_NAME);
-    when(offeringRepository.findById("testsku")).thenReturn(Optional.of(o));
-    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(Optional.of(s));
-    when(mockProfile.isProductPAYGEligible("testsku")).thenReturn(true);
+    o.setMetered(true);
+    when(offeringRepository.findById(SKU)).thenReturn(Optional.of(o));
+    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(List.of(s));
 
     var termination = OffsetDateTime.now();
     var result = subscriptionSyncController.terminateSubscription("456", termination);
@@ -568,14 +517,11 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void lateTerminateActivePAYGSubscriptionTest() {
-    Subscription s = createSubscription("123", "testsku", "456");
-    Offering offering = Offering.builder().productName(PAYG_PRODUCT_NAME).build();
+    Subscription s = createSubscription();
+    Offering offering = Offering.builder().productName(PAYG_PRODUCT_NAME).metered(true).build();
     s.setOffering(offering);
-    when(offeringRepository.findById("testsku")).thenReturn(Optional.of(offering));
-    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(Optional.of(s));
-    when(mockProfile.tagForOfferingProductName(PAYG_PRODUCT_NAME))
-        .thenReturn("OpenShift-dedicated-metrics");
-    when(mockProfile.isProductPAYGEligible("OpenShift-dedicated-metrics")).thenReturn(true);
+    when(offeringRepository.findById(SKU)).thenReturn(Optional.of(offering));
+    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(List.of(s));
 
     var termination = OffsetDateTime.now().minusDays(1);
     var result = subscriptionSyncController.terminateSubscription("456", termination);
@@ -587,13 +533,10 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void terminateInTheFutureActivePAYGSubscriptionTest() {
-    Subscription s = createSubscription("123", "testsku", "456");
+    Subscription s = createSubscription();
     s.getOffering().setProductName(PAYG_PRODUCT_NAME);
-    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(Optional.of(s));
-
-    when(mockProfile.tagForOfferingProductName(PAYG_PRODUCT_NAME))
-        .thenReturn("OpenShift-dedicated-metrics");
-    when(mockProfile.isProductPAYGEligible("OpenShift-dedicated-metrics")).thenReturn(true);
+    s.getOffering().setMetered(true);
+    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(List.of(s));
 
     var termination = OffsetDateTime.now().plusDays(1);
     var result = subscriptionSyncController.terminateSubscription("456", termination);
@@ -605,11 +548,9 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void terminateActiveNonPAYGSubscriptionTest() {
-    Subscription s = createSubscription("123", "testsku", "456");
+    Subscription s = createSubscription();
     s.getOffering().setProductName("Random Product");
-    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(Optional.of(s));
-    when(mockProfile.tagForOfferingProductName("Random Product")).thenReturn("random");
-    when(mockProfile.isProductPAYGEligible("random")).thenReturn(false);
+    when(subscriptionRepository.findActiveSubscription("456")).thenReturn(List.of(s));
 
     var termination = OffsetDateTime.now();
     var result = subscriptionSyncController.terminateSubscription("456", termination);
@@ -632,14 +573,14 @@ class SubscriptionSyncControllerTest {
                 .sellerAccount("s")));
 
     when(denylist.productIdMatches(any())).thenReturn(false);
-    when(offeringRepository.existsById("testsku")).thenReturn(true);
+    when(offeringRepository.existsById(SKU)).thenReturn(true);
 
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
     when(subscriptionService.getSubscriptionBySubscriptionNumber("subnum"))
         .thenReturn(serviceResponse);
 
-    subscriptionSyncController.syncSubscription("testsku", incoming, Optional.empty());
+    subscriptionSyncController.syncSubscription(SKU, incoming, Optional.empty());
     verify(subscriptionService).getSubscriptionBySubscriptionNumber("subnum");
     assertEquals("billingAccountId", incoming.getBillingAccountId());
     assertEquals(BillingProvider.AWS, incoming.getBillingProvider());
@@ -650,17 +591,17 @@ class SubscriptionSyncControllerTest {
   @Test
   void testSubscriptionEnrichedFromDbWhenSubscriptionIdMissing() {
     Subscription incoming = createConvertedDtoSubscription("123", null);
-    Subscription existing = createSubscription("123", "testsku", "456");
+    Subscription existing = createSubscription();
     existing.setBillingAccountId("billingAccountId");
     existing.setBillingProvider(BillingProvider.RED_HAT);
     existing.setBillingProviderId("billingProviderId");
 
     when(denylist.productIdMatches(any())).thenReturn(false);
-    when(offeringRepository.existsById("testsku")).thenReturn(true);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    when(offeringRepository.existsById(SKU)).thenReturn(true);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
 
-    subscriptionSyncController.syncSubscription("testsku", incoming, Optional.of(existing));
+    subscriptionSyncController.syncSubscription(SKU, incoming, Optional.of(existing));
 
     verifyNoInteractions(subscriptionService);
     assertEquals("billingAccountId", incoming.getBillingAccountId());
@@ -672,13 +613,13 @@ class SubscriptionSyncControllerTest {
   @Test
   void testSubscriptionNotEnrichedWhenSubscriptionIdPresent() {
     Subscription incoming = createConvertedDtoSubscription("123", "456");
-    Subscription existing = createSubscription("123", "testsku", "456");
+    Subscription existing = createSubscription();
     existing.setBillingAccountId("billingAccountId");
 
     when(denylist.productIdMatches(any())).thenReturn(false);
-    when(offeringRepository.existsById("testsku")).thenReturn(true);
+    when(offeringRepository.existsById(SKU)).thenReturn(true);
 
-    subscriptionSyncController.syncSubscription("testsku", incoming, Optional.of(existing));
+    subscriptionSyncController.syncSubscription(SKU, incoming, Optional.of(existing));
 
     verifyNoInteractions(subscriptionService);
     verify(subscriptionRepository).save(any());
@@ -691,25 +632,23 @@ class SubscriptionSyncControllerTest {
     incoming.setBillingProvider(BillingProvider.RED_HAT);
     incoming.setBillingProviderId("newBillingProviderId");
     incoming.setBillingAccountId("newBillingAccountId");
-    incoming.setAccountNumber("account123");
-    Subscription existing = createSubscription("123", "testsku", "456");
+    Subscription existing = createSubscription();
     existing.setBillingProvider(BillingProvider.AWS);
     existing.setBillingAccountId("oldBillingAccountId");
     existing.setBillingProviderId("oldBillinProviderId");
 
     when(denylist.productIdMatches(any())).thenReturn(false);
-    when(offeringRepository.existsById("testsku")).thenReturn(true);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    when(offeringRepository.existsById(SKU)).thenReturn(true);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
 
-    subscriptionSyncController.syncSubscription("testsku", incoming, Optional.of(existing));
+    subscriptionSyncController.syncSubscription(SKU, incoming, Optional.of(existing));
 
     verifyNoInteractions(subscriptionService);
     verify(subscriptionRepository).save(existing);
     assertEquals(BillingProvider.RED_HAT, existing.getBillingProvider());
     assertEquals("newBillingProviderId", existing.getBillingProviderId());
     assertEquals("newBillingAccountId", existing.getBillingAccountId());
-    assertEquals("account123", existing.getAccountNumber());
   }
 
   @Test
@@ -717,14 +656,14 @@ class SubscriptionSyncControllerTest {
     Subscription incoming = createConvertedDtoSubscription("123", "456");
 
     when(denylist.productIdMatches(any())).thenReturn(false);
-    when(offeringRepository.existsById("testsku")).thenReturn(false);
-    when(offeringSyncController.syncOffering("testsku")).thenReturn(SyncResult.SKIPPED_MATCHING);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    when(offeringRepository.existsById(SKU)).thenReturn(false);
+    when(offeringSyncController.syncOffering(SKU)).thenReturn(SyncResult.SKIPPED_MATCHING);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
 
-    subscriptionSyncController.syncSubscription("testsku", incoming, Optional.empty());
+    subscriptionSyncController.syncSubscription(SKU, incoming, Optional.empty());
 
-    verify(offeringSyncController).syncOffering("testsku");
+    verify(offeringSyncController).syncOffering(SKU);
     verify(subscriptionRepository).save(incoming);
     assertNull(incoming.getBillingAccountId());
   }
@@ -734,20 +673,20 @@ class SubscriptionSyncControllerTest {
     Subscription incoming = createConvertedDtoSubscription("123", "456");
 
     when(denylist.productIdMatches(any())).thenReturn(false);
-    when(offeringRepository.existsById("testsku")).thenReturn(false);
-    when(offeringSyncController.syncOffering("testsku")).thenReturn(SyncResult.FAILED);
-    Offering offering = Offering.builder().sku("testsku").build();
-    when(offeringRepository.getReferenceById("testsku")).thenReturn(offering);
+    when(offeringRepository.existsById(SKU)).thenReturn(false);
+    when(offeringSyncController.syncOffering(SKU)).thenReturn(SyncResult.FAILED);
+    Offering offering = Offering.builder().sku(SKU).build();
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
 
-    subscriptionSyncController.syncSubscription("testsku", incoming, Optional.empty());
+    subscriptionSyncController.syncSubscription(SKU, incoming, Optional.empty());
 
-    verify(offeringSyncController).syncOffering("testsku");
+    verify(offeringSyncController).syncOffering(SKU);
     verify(subscriptionRepository, times(0)).save(incoming);
   }
 
   @Test
   void testShouldRemoveStaleSubscriptionsNotPresentInSubscriptionService() {
-    var subscription = createSubscription("123", "testsku", "456");
+    var subscription = createSubscription();
     when(subscriptionRepository.findByOrgId(any())).thenReturn(Stream.of(subscription));
     subscriptionSyncController.reconcileSubscriptionsWithSubscriptionService("org123", false);
     verify(subscriptionRepository).deleteAll(subscriptionsCaptor.capture());
@@ -756,7 +695,7 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void testShouldRemoveStaleSubscriptionsPresentInSubscriptionServiceButDenylisted() {
-    var subscription = createSubscription("123", "testsku", "456");
+    var subscription = createSubscription();
     var subServiceSub = createDto("456", 1);
     when(subscriptionRepository.findByOrgId(any())).thenReturn(Stream.of(subscription));
     when(subscriptionService.getSubscriptionsByOrgId(any())).thenReturn(List.of(subServiceSub));
@@ -768,7 +707,7 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void testShouldNotRemovePresentSub() {
-    var subscription = createSubscription("123", "testsku", "456");
+    var subscription = createSubscription();
     var subServiceSub = createDto("456", 1);
     subscription.setStartDate(clock.dateFromMilliseconds(subServiceSub.getEffectiveStartDate()));
     when(subscriptionRepository.findByOrgId(any())).thenReturn(Stream.of(subscription));
@@ -781,8 +720,8 @@ class SubscriptionSyncControllerTest {
 
   @Test
   void testShouldKeepRecordsWithSameIdAndDifferentStartDates() {
-    var subscription1 = createSubscription("123", "testsku", "456");
-    var subscription2 = createSubscription("123", "testsku", "456");
+    var subscription1 = createSubscription();
+    var subscription2 = createSubscription();
     subscription2.setEndDate(subscription1.getEndDate().plusDays(2));
     var subServiceSub = createDto("456", 1);
     subscription2.setStartDate(clock.dateFromMilliseconds(subServiceSub.getEffectiveStartDate()));
@@ -793,6 +732,32 @@ class SubscriptionSyncControllerTest {
     subscriptionSyncController.reconcileSubscriptionsWithSubscriptionService("org123", false);
     verify(subscriptionRepository).deleteAll(subscriptionsCaptor.capture());
     assertFalse(subscriptionsCaptor.getValue().iterator().hasNext());
+  }
+
+  private Offering givenOfferingWithProductIds(Integer... productIds) {
+    Offering offering = new Offering();
+    offering.setSku(SKU);
+    offering.setProductIds(Set.of(productIds));
+    when(offeringRepository.getReferenceById(SKU)).thenReturn(offering);
+    when(offeringSyncController.syncOffering(SKU)).thenReturn(SyncResult.FETCHED_AND_SYNCED);
+    return offering;
+  }
+
+  private Subscription createSubscription() {
+    return createSubscription("123", SKU, "456");
+  }
+
+  private Subscription createSubscriptionFrom(
+      Offering offering, org.candlepin.subscriptions.subscription.api.model.Subscription dto) {
+    return Subscription.builder()
+        .subscriptionId("" + dto.getId())
+        .subscriptionNumber(dto.getSubscriptionNumber())
+        .orgId("" + dto.getWebCustomerId())
+        .quantity(dto.getQuantity())
+        .offering(offering)
+        .startDate(clock.dateFromMilliseconds(dto.getEffectiveStartDate()))
+        .endDate(clock.dateFromMilliseconds(dto.getEffectiveEndDate()))
+        .build();
   }
 
   private Subscription createSubscription(String orgId, String sku, String subId) {
@@ -835,7 +800,7 @@ class SubscriptionSyncControllerTest {
     dto.setEffectiveEndDate(toEpochMillis(NOW.plusDays(30)));
     dto.setWebCustomerId(orgId);
 
-    var product = new SubscriptionProduct().parentSubscriptionProductId(null).sku("testsku");
+    var product = new SubscriptionProduct().parentSubscriptionProductId(null).sku(SKU);
     List<SubscriptionProduct> products = Collections.singletonList(product);
     dto.setSubscriptionProducts(products);
 
@@ -848,7 +813,6 @@ class SubscriptionSyncControllerTest {
     return org.candlepin.subscriptions.db.model.Subscription.builder()
         .subscriptionId(String.valueOf(subscription.getId()))
         .orgId(subscription.getWebCustomerId().toString())
-        .accountNumber(String.valueOf(subscription.getOracleAccountNumber()))
         .quantity(subscription.getQuantity())
         .startDate(clock.dateFromMilliseconds(subscription.getEffectiveStartDate()))
         .endDate(clock.dateFromMilliseconds(subscription.getEffectiveEndDate()))

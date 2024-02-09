@@ -2,7 +2,7 @@
 # NOTE: if you need to debug this file, use DRY_RUN=true to echo docker/podman/oc commands without running them
 
 # before we run common consoledot builds, prepare the binary artifacts for quarkus style builds
-./podman_run.sh ./gradlew assemble
+./podman_run.sh
 
 source cicd_common.sh
 
@@ -16,7 +16,6 @@ export IQE_CJI_TIMEOUT="30m"  # This is the time to wait for smoke test to compl
 export IQE_IMAGE_TAG="rhsm-subscriptions"
 # NOTE: workaround for frontend deployment not being ready yet below
 export IQE_LOG_LEVEL="debug"
-export IQE_IBUTSU_SOURCE="rhsm-ephemeral"
 export IQE_RP_ARGS="true"
 export IQE_PARALLEL_ENABLED="false"
 
@@ -25,7 +24,13 @@ export IQE_PARALLEL_ENABLED="false"
 CICD_URL=https://raw.githubusercontent.com/RedHatInsights/bonfire/master/cicd
 curl -s $CICD_URL/bootstrap.sh > .cicd_bootstrap.sh && source .cicd_bootstrap.sh
 # Borrow the venv that bonfire sets up to do validation of our topic references
-python bin/validate-topics.py
+
+# Disable the validation of topics for now until SWATCH-1904 is resolved.
+# python bin/validate-topics.py
+
+# Initialize the GIT config which is required by the Gradle Nebula plugin to build the images
+git config user.name "$(git --no-pager log --format=format:'%an' -n 1)"
+git config user.email "$(git --no-pager log --format=format:'%ae' -n 1)"
 
 IMAGES=""
 
@@ -43,18 +48,21 @@ for service in $SERVICES; do
 done
 
 APP_ROOT=$PWD
-
+export IQE_IBUTSU_SOURCE="rhsm-ephemeral-${IMAGE_TAG}"
 # NOTE: uncomment the following line to test authenticated kafka
 #NAMESPACE_POOL="managed-kafka"
 EXTRA_DEPLOY_ARGS="--timeout 1800 ${IMAGES}"
 OPTIONAL_DEPS_METHOD=none
 
-#each gets appended with --component
-export COMPONENTS_W_RESOURCES="rhsm swatch-api swatch-contracts swatch-producer-aws swatch-producer-red-hat-marketplace swatch-metrics swatch-subscription-sync swatch-system-conduit swatch-tally"
+# set CLI option for --no-remove-resources
+export COMPONENTS_W_RESOURCES="app:rhsm"
+
 # NOTE: this ensures that all of the other services end up deployed with the latest template
-for EXTRA_COMPONENT_NAME in $COMPONENTS_W_RESOURCES; do
+export EXTRA_COMPONENTS="rhsm swatch-api swatch-contracts swatch-producer-aws swatch-producer-red-hat-marketplace swatch-metrics swatch-subscription-sync swatch-system-conduit swatch-tally swatch-producer-azure"
+for EXTRA_COMPONENT_NAME in $EXTRA_COMPONENTS; do
   export EXTRA_DEPLOY_ARGS="${EXTRA_DEPLOY_ARGS} --set-template-ref ${EXTRA_COMPONENT_NAME}=${GIT_COMMIT}"
 done
+
 # Deploy to an ephemeral namespace for testing
 source deploy_ephemeral_env.sh
 

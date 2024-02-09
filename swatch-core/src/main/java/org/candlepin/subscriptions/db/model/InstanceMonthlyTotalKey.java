@@ -20,22 +20,18 @@
  */
 package org.candlepin.subscriptions.db.model;
 
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import jakarta.persistence.Column;
 import jakarta.persistence.Embeddable;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
 import java.io.Serializable;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.candlepin.subscriptions.json.Measurement;
 
 /** Key for instance monthly totals */
 @Data
 @NoArgsConstructor
-@AllArgsConstructor
 @Embeddable
 public class InstanceMonthlyTotalKey implements Serializable {
   private static final DateTimeFormatter MONTH_ID_FORMATTER =
@@ -45,16 +41,20 @@ public class InstanceMonthlyTotalKey implements Serializable {
   @Column(nullable = false) // ENT-4622 needed to avoid recreating collections
   private String month;
 
-  @Enumerated(EnumType.STRING) // ENT-4622 needed to avoid recreating collections
-  @Column(nullable = false)
-  private Measurement.Uom uom;
+  @Column(name = "metric_id", nullable = false)
+  private String metricId;
 
   public static String formatMonthId(OffsetDateTime reference) {
     return reference.format(MONTH_ID_FORMATTER);
   }
 
-  public InstanceMonthlyTotalKey(OffsetDateTime reference, Measurement.Uom uom) {
+  public InstanceMonthlyTotalKey(String month, String metricId) {
+    this.month = month;
+    this.metricId = MetricIdUtils.toUpperCaseFormatted(metricId);
+  }
+
+  public InstanceMonthlyTotalKey(OffsetDateTime reference, String metricId) {
     this.month = formatMonthId(reference);
-    this.uom = uom;
+    this.metricId = MetricIdUtils.toUpperCaseFormatted(metricId);
   }
 }

@@ -22,8 +22,9 @@ package org.candlepin.subscriptions.tally.roller;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.OffsetDateTime;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -35,8 +36,6 @@ import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.TallySnapshot;
 import org.candlepin.subscriptions.db.model.Usage;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 import org.candlepin.subscriptions.tally.AccountUsageCalculation;
 import org.candlepin.subscriptions.tally.UsageCalculation;
 import org.candlepin.subscriptions.tally.UsageCalculation.Totals;
@@ -45,7 +44,7 @@ import org.springframework.data.domain.PageRequest;
 /** Since the roller tests are very similar, this class provides some common test scenarios. */
 @SuppressWarnings("linelength")
 public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
-  private String testProduct = "RHEL";
+  private String testProduct = "RHEL for x86";
 
   private TallySnapshotRepository repository;
   private R roller;
@@ -163,12 +162,11 @@ public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
     int highSockets = 200;
     int highInstances = 10;
 
-    String account = "A1";
     String orgId = "01";
     AccountUsageCalculation a1HighCalc =
-        createAccountCalc(account, orgId, getTestProduct(), highCores, highSockets, highInstances);
+        createAccountCalc(orgId, getTestProduct(), highCores, highSockets, highInstances);
     AccountUsageCalculation a1LowCalc =
-        createAccountCalc(account, orgId, getTestProduct(), lowCores, lowSockets, lowInstances);
+        createAccountCalc(orgId, getTestProduct(), lowCores, lowSockets, lowInstances);
 
     AccountUsageCalculation expectedCalc = expectMaxAccepted ? a1HighCalc : a1LowCalc;
 
@@ -230,11 +228,9 @@ public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
       OffsetDateTime endOfGranularPeriod) {
 
     AccountUsageCalculation a1Calc = createTestData();
-    String account = a1Calc.getAccount();
     String orgId = a1Calc.getOrgId();
 
     TallySnapshot orig = new TallySnapshot();
-    orig.setAccountNumber("my_account");
     orig.setOrgId(orgId);
     orig.setServiceLevel(ServiceLevel.EMPTY);
     orig.setUsage(Usage.EMPTY);
@@ -245,7 +241,6 @@ public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
     orig.setProductId(getTestProduct());
 
     TallySnapshot dupe = new TallySnapshot();
-    dupe.setAccountNumber("my_account");
     dupe.setOrgId(orgId);
     dupe.setServiceLevel(ServiceLevel.EMPTY);
     dupe.setUsage(Usage.EMPTY);
@@ -303,16 +298,11 @@ public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
   }
 
   private AccountUsageCalculation createTestData() {
-    return createAccountCalc("my_account", "O1", getTestProduct(), 12, 24, 6);
+    return createAccountCalc("O1", getTestProduct(), 12, 24, 6);
   }
 
   private AccountUsageCalculation createAccountCalc(
-      String account,
-      String orgId,
-      String product,
-      int totalCores,
-      int totalSockets,
-      int totalInstances) {
+      String orgId, String product, int totalCores, int totalSockets, int totalInstances) {
     UsageCalculation productCalc = new UsageCalculation(createUsageKey(product));
     Stream.of(
             HardwareMeasurementType.AWS,
@@ -321,13 +311,12 @@ public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
             HardwareMeasurementType.HYPERVISOR)
         .forEach(
             type -> {
-              productCalc.add(type, Measurement.Uom.CORES, (double) totalCores);
-              productCalc.add(type, Measurement.Uom.SOCKETS, (double) totalSockets);
-              productCalc.add(type, Uom.INSTANCES, (double) totalInstances);
+              productCalc.add(type, MetricIdUtils.getCores(), (double) totalCores);
+              productCalc.add(type, MetricIdUtils.getSockets(), (double) totalSockets);
+              productCalc.add(type, MetricIdUtils.getInstanceHours(), (double) totalInstances);
             });
 
     AccountUsageCalculation calc = new AccountUsageCalculation(orgId);
-    calc.setAccount(account);
     calc.addCalculation(productCalc);
 
     return calc;
@@ -341,15 +330,14 @@ public class SnapshotRollerTester<R extends BaseSnapshotRoller> {
 
     for (HardwareMeasurementType type : HardwareMeasurementType.values()) {
       Totals expectedTotal = expectedVals.getTotals(type);
-      Arrays.stream(Measurement.Uom.values())
+      MetricId.getAll()
           .forEach(
-              uom -> {
-                assertEquals(
-                    Optional.ofNullable(expectedTotal)
-                        .map(totals -> totals.getMeasurement(uom))
-                        .orElse(null),
-                    snapshot.getMeasurement(type, uom));
-              });
+              uom ->
+                  assertEquals(
+                      Optional.ofNullable(expectedTotal)
+                          .map(totals -> totals.getMeasurement(uom))
+                          .orElse(null),
+                      snapshot.getMeasurement(type, uom)));
     }
   }
 }

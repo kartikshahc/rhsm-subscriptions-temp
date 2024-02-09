@@ -36,7 +36,7 @@ class VariantTest {
 
     var variant = Variant.findByRole("Red Hat Enterprise Linux Server");
 
-    var expected = "RHEL Server";
+    var expected = "RHEL for x86";
     var actual = variant.get().getTag();
 
     assertEquals(expected, actual);
@@ -56,6 +56,18 @@ class VariantTest {
 
     var actual = Variant.findByEngProductId("69");
 
-    assertEquals("RHEL Server", actual.get().getTag());
+    assertEquals("RHEL for x86", actual.get().getTag());
+  }
+
+  @Test
+  void testGranularityCompatibility() {
+    assertTrue(
+        Variant.isGranularityCompatible("RHEL for x86", SubscriptionDefinitionGranularity.DAILY));
+  }
+
+  @Test
+  void testGranularityCompatibilityNotSupported() {
+    assertFalse(
+        Variant.isGranularityCompatible("RHEL for x86", SubscriptionDefinitionGranularity.HOURLY));
   }
 }

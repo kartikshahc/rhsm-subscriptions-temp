@@ -20,33 +20,25 @@
  */
 package org.candlepin.subscriptions.tally.billing;
 
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
+import com.redhat.swatch.configuration.registry.Variant;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
 import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
 import org.candlepin.subscriptions.json.BillableUsage;
-import org.candlepin.subscriptions.json.BillableUsage.Uom;
 import org.candlepin.subscriptions.json.TallySnapshot;
 import org.candlepin.subscriptions.json.TallySnapshot.BillingProvider;
 import org.candlepin.subscriptions.json.TallySnapshot.Granularity;
 import org.candlepin.subscriptions.json.TallySnapshot.Sla;
 import org.candlepin.subscriptions.json.TallySnapshot.Usage;
 import org.candlepin.subscriptions.json.TallySummary;
-import org.candlepin.subscriptions.registry.TagProfile;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Slf4j
 @Component
 public class BillableUsageMapper {
-
-  private final TagProfile tagProfile;
-
-  @Autowired
-  public BillableUsageMapper(TagProfile tagProfile) {
-    this.tagProfile = tagProfile;
-  }
 
   /**
    * We only want to send snapshot information for PAYG product ids. To prevent duplicate data, we
@@ -59,7 +51,11 @@ public class BillableUsageMapper {
   protected boolean isSnapshotPAYGEligible(TallySnapshot snapshot) {
     String productId = snapshot.getProductId();
 
-    boolean isApplicableProduct = tagProfile.isProductPAYGEligible(productId);
+    boolean isApplicableProduct =
+        Variant.findByTag(productId)
+            .map(Variant::getSubscription)
+            .map(SubscriptionDefinition::isPaygEligible)
+            .orElse(false);
 
     boolean isHourlyGranularity = Objects.equals(Granularity.HOURLY, snapshot.getGranularity());
 
@@ -104,7 +100,6 @@ public class BillableUsageMapper {
                     .map(
                         measurement ->
                             new BillableUsage()
-                                .withAccountNumber(tallySummary.getAccountNumber())
                                 .withOrgId(tallySummary.getOrgId())
                                 .withId(snapshot.getId())
                                 .withSnapshotDate(snapshot.getSnapshotDate())
@@ -116,8 +111,10 @@ public class BillableUsageMapper {
                                     BillableUsage.BillingProvider.fromValue(
                                         snapshot.getBillingProvider().value()))
                                 .withBillingAccountId(snapshot.getBillingAccountId())
-                                .withUom(Uom.fromValue(measurement.getUom().value()))
-                                .withValue(measurement.getValue())));
+                                .withUom(measurement.getUom())
+                                .withValue(measurement.getValue())
+                                .withHardwareMeasurementType(
+                                    measurement.getHardwareMeasurementType())));
   }
 
   private boolean hasMeasurements(TallySnapshot tallySnapshot) {

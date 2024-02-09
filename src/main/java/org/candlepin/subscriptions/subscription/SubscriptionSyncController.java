@@ -22,53 +22,55 @@ package org.candlepin.subscriptions.subscription;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.xml.XmlMapper;
+import com.google.common.collect.MoreCollectors;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
+import com.redhat.swatch.configuration.registry.Variant;
 import io.micrometer.core.annotation.Timed;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityNotFoundException;
 import jakarta.transaction.Transactional;
+import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.core.Response;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.capacity.CapacityReconciliationController;
 import org.candlepin.subscriptions.capacity.files.ProductDenylist;
 import org.candlepin.subscriptions.db.OfferingRepository;
-import org.candlepin.subscriptions.db.SubscriptionMeasurementRepository;
+import org.candlepin.subscriptions.db.OrgConfigRepository;
 import org.candlepin.subscriptions.db.SubscriptionRepository;
 import org.candlepin.subscriptions.db.model.BillingProvider;
 import org.candlepin.subscriptions.db.model.DbReportCriteria;
-import org.candlepin.subscriptions.db.model.OrgConfigRepository;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.Subscription.SubscriptionCompoundId;
 import org.candlepin.subscriptions.db.model.Subscription_;
 import org.candlepin.subscriptions.db.model.Usage;
 import org.candlepin.subscriptions.exception.ErrorCode;
 import org.candlepin.subscriptions.exception.MissingOfferingException;
+import org.candlepin.subscriptions.exception.SubscriptionsException;
 import org.candlepin.subscriptions.product.OfferingSyncController;
 import org.candlepin.subscriptions.product.SyncResult;
-import org.candlepin.subscriptions.registry.TagMetric;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.subscription.api.model.Subscription;
 import org.candlepin.subscriptions.tally.UsageCalculation.Key;
 import org.candlepin.subscriptions.task.TaskQueueProperties;
-import org.candlepin.subscriptions.umb.CanonicalMessage;
 import org.candlepin.subscriptions.umb.SubscriptionProductStatus;
 import org.candlepin.subscriptions.umb.UmbSubscription;
-import org.candlepin.subscriptions.user.AccountService;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.utilization.admin.api.model.OfferingProductTags;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -77,34 +79,29 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
-import org.springframework.util.StringUtils;
 
 /** Update subscriptions from subscription service responses. */
 @Component
 @Slf4j
 public class SubscriptionSyncController {
-
-  private static final XmlMapper umbMessageMapper = CanonicalMessage.createMapper();
-  private SubscriptionRepository subscriptionRepository;
-  private OrgConfigRepository orgRepository;
-  private OfferingRepository offeringRepository;
-  private SubscriptionService subscriptionService;
-  private ApplicationClock clock;
-  private CapacityReconciliationController capacityReconciliationController;
-  private OfferingSyncController offeringSyncController;
-  private SubscriptionServiceProperties properties;
-  private Timer enqueueAllTimer;
-  private KafkaTemplate<String, SyncSubscriptionsTask> syncSubscriptionsByOrgKafkaTemplate;
-  private final TagProfile tagProfile;
-  private final AccountService accountService;
-  private String syncSubscriptionsTopic;
+  private final SubscriptionRepository subscriptionRepository;
+  private final OrgConfigRepository orgRepository;
+  private final OfferingRepository offeringRepository;
+  private final SubscriptionService subscriptionService;
+  private final ApplicationClock clock;
+  private final CapacityReconciliationController capacityReconciliationController;
+  private final OfferingSyncController offeringSyncController;
+  private final SubscriptionServiceProperties properties;
+  private final Timer enqueueAllTimer;
+  private final KafkaTemplate<String, SyncSubscriptionsTask> syncSubscriptionsByOrgKafkaTemplate;
+  private final String syncSubscriptionsTopic;
   private final ObjectMapper objectMapper;
   private final ProductDenylist productDenylist;
+  private final EntityManager entityManager;
 
   @Autowired
   public SubscriptionSyncController(
       SubscriptionRepository subscriptionRepository,
-      SubscriptionMeasurementRepository measurementRepository,
       OrgConfigRepository orgRepository,
       OfferingRepository offeringRepository,
       ApplicationClock clock,
@@ -117,8 +114,7 @@ public class SubscriptionSyncController {
       ProductDenylist productDenylist,
       ObjectMapper objectMapper,
       @Qualifier("syncSubscriptionTasks") TaskQueueProperties props,
-      TagProfile tagProfile,
-      AccountService accountService) {
+      EntityManager entityManager) {
     this.subscriptionRepository = subscriptionRepository;
     this.orgRepository = orgRepository;
     this.offeringRepository = offeringRepository;
@@ -132,15 +128,7 @@ public class SubscriptionSyncController {
     this.objectMapper = objectMapper;
     this.syncSubscriptionsTopic = props.getTopic();
     this.syncSubscriptionsByOrgKafkaTemplate = syncSubscriptionsByOrgKafkaTemplate;
-    this.tagProfile = tagProfile;
-    this.accountService = accountService;
-  }
-
-  @Transactional
-  public void syncSubscription(Subscription subscription) {
-    syncSubscription(
-        subscription,
-        subscriptionRepository.findActiveSubscription(String.valueOf(subscription.getId())));
+    this.entityManager = entityManager;
   }
 
   @Transactional
@@ -174,18 +162,13 @@ public class SubscriptionSyncController {
       return;
     }
 
-    // NOTE: we do not need to check if the offering exists if there is an existing DB record for
-    // the subscription that uses that offering
-    if (subscriptionOptional.isEmpty() && !offeringRepository.existsById(sku)) {
-      log.debug("Sku={} not in Offering repository, syncing offering.", sku);
-      if (!SyncResult.isSynced(offeringSyncController.syncOffering(sku))) {
-        log.debug(
-            "Sku {} unable to be synced, skipping subscription sync for subscriptionId: {} in org: {}",
-            sku,
-            newOrUpdated.getSubscriptionId(),
-            newOrUpdated.getOrgId());
-        return;
-      }
+    if (!ensureOffering(sku, subscriptionOptional)) {
+      log.debug(
+          "Sku {} unable to be synced, skipping subscription sync for subscriptionId: {} in org: {}",
+          sku,
+          newOrUpdated.getSubscriptionId(),
+          newOrUpdated.getOrgId());
+      return;
     }
 
     subscriptionOptional.ifPresentOrElse(
@@ -217,6 +200,16 @@ public class SubscriptionSyncController {
       final org.candlepin.subscriptions.db.model.Subscription existingSubscription =
           subscriptionOptional.get();
       log.debug("Existing subscription in DB={}", existingSubscription);
+      if (Objects.nonNull(existingSubscription.getBillingProvider())
+          && !existingSubscription.getSubscriptionMeasurements().isEmpty()) {
+        // NOTE(khowell): longer term, we should query the partnerEntitlement service for this
+        // subscription on any attempt to sync, but for now we rely on UMB messages from the IT
+        // Partner Entitlement service to update this record outside this process.
+        log.info(
+            "Skipping sync of subscriptionId={} because it has contract-provided capacity",
+            existingSubscription.getSubscriptionId());
+        return;
+      }
       if (existingSubscription.equals(newOrUpdated)) {
         return; // we have nothing to do as the DB and the subs service have the same info
       }
@@ -228,7 +221,6 @@ public class SubscriptionSyncController {
                 .subscriptionId(existingSubscription.getSubscriptionId())
                 .offering(existingSubscription.getOffering())
                 .orgId(existingSubscription.getOrgId())
-                .accountNumber(existingSubscription.getAccountNumber())
                 .quantity(newOrUpdated.getQuantity())
                 .startDate(OffsetDateTime.now())
                 .endDate(newOrUpdated.getEndDate())
@@ -248,19 +240,26 @@ public class SubscriptionSyncController {
     }
   }
 
+  private boolean ensureOffering(
+      String sku,
+      Optional<org.candlepin.subscriptions.db.model.Subscription> subscriptionOptional) {
+    // NOTE: we do not need to check if the offering exists if there is an existing DB record for
+    // the subscription that uses that offering
+    if (subscriptionOptional.isEmpty() && !offeringRepository.existsById(sku)) {
+      log.debug("Sku={} not in Offering repository, syncing offering.", sku);
+      return SyncResult.isSynced(offeringSyncController.syncOffering(sku));
+    }
+    return true;
+  }
+
   private void checkForMissingBillingProvider(
       org.candlepin.subscriptions.db.model.Subscription subscription) {
-    if (subscription.getBillingProvider() == null
-        || subscription.getBillingProvider().equals(BillingProvider.EMPTY)) {
-      // The offering here is going to be a proxy object created by getReferenceById.  Hibernate
-      // should take care of actually performing the select from the database if one is needed.
-      var productTag =
-          tagProfile.tagForOfferingProductName(subscription.getOffering().getProductName());
-      if (tagProfile.isProductPAYGEligible(productTag)) {
-        log.warn(
-            "PAYG eligible subscription with subscriptionId:{} has no billing provider.",
-            subscription.getSubscriptionId());
-      }
+    if ((subscription.getBillingProvider() == null
+            || subscription.getBillingProvider().equals(BillingProvider.EMPTY))
+        && subscription.getOffering().isMetered()) {
+      log.warn(
+          "PAYG eligible subscription with subscriptionId:{} has no billing provider.",
+          subscription.getSubscriptionId());
     }
   }
 
@@ -304,50 +303,84 @@ public class SubscriptionSyncController {
   }
 
   @Transactional
-  public void syncSubscription(String subscriptionId) {
-    Subscription subscription = subscriptionService.getSubscriptionById(subscriptionId);
-    syncSubscription(subscription);
-  }
-
-  @Transactional
   @Timed("swatch_subscription_reconcile_org")
   public void reconcileSubscriptionsWithSubscriptionService(String orgId, boolean paygOnly) {
     log.info("Syncing subscriptions for orgId={}", orgId);
-    Set<String> seenSubscriptionIds = new HashSet<>();
-    Map<SubscriptionCompoundId, org.candlepin.subscriptions.db.model.Subscription>
-        swatchSubscriptions;
 
-    var subscriptions = subscriptionService.getSubscriptionsByOrgId(orgId).stream();
+    var dtos = subscriptionService.getSubscriptionsByOrgId(orgId).stream();
+
     // Filter out non PAYG subscriptions for faster processing when they are not needed.
     // Slow processing was causing: https://issues.redhat.com/browse/ENT-5083
+
     if (paygOnly) {
-      subscriptions =
-          subscriptions.filter(
+      dtos =
+          dtos.filter(
               subscription -> SubscriptionDtoUtil.extractBillingProviderId(subscription) != null);
     }
 
-    try (var subs = subscriptionRepository.findByOrgId(orgId)) {
-      swatchSubscriptions =
-          subs.collect(
-              Collectors.toMap(
-                  sub -> new SubscriptionCompoundId(sub.getSubscriptionId(), sub.getStartDate()),
-                  Function.identity(),
-                  (s1, s2) -> s1));
-    }
-    subscriptions
-        .filter(this::shouldSyncSub)
+    var subCompoundIdToDtoMap =
+        dtos.filter(this::shouldSyncSub)
+            .collect(
+                Collectors.toMap(
+                    dto -> {
+                      OffsetDateTime startDate =
+                          clock.dateFromMilliseconds(dto.getEffectiveStartDate());
+
+                      return new SubscriptionCompoundId(dto.getId().toString(), startDate);
+                    },
+                    Function.identity(),
+                    (firstMatch, secondMatch) -> firstMatch));
+
+    List<org.candlepin.subscriptions.db.model.Subscription> subEntitiesForDeletion =
+        new ArrayList<>();
+
+    Set<String> seenIds =
+        subCompoundIdToDtoMap.keySet().stream()
+            .map(SubscriptionCompoundId::getSubscriptionId)
+            .collect(Collectors.toSet());
+
+    var batchSize = 1024;
+    CustomBatchIterator.batchStreamOf(subscriptionRepository.findByOrgId(orgId), batchSize)
         .forEach(
-            subscription -> {
-              if (productDenylist.productIdMatches(SubscriptionDtoUtil.extractSku(subscription))) {
-                return;
-              }
-              seenSubscriptionIds.add(subscription.getId().toString());
-              var swatchSubscription =
-                  swatchSubscriptions.remove(
-                      new SubscriptionCompoundId(
-                          subscription.getId().toString(),
-                          clock.dateFromMilliseconds(subscription.getEffectiveStartDate())));
-              syncSubscription(subscription, Optional.ofNullable(swatchSubscription));
+            batch -> {
+              batch.forEach(
+                  subEntity -> {
+                    var startDate = subEntity.getStartDate();
+                    var subId = subEntity.getSubscriptionId();
+
+                    var key = new SubscriptionCompoundId(subId, startDate);
+
+                    var dto = subCompoundIdToDtoMap.remove(key);
+
+                    // delete from swatch because it didn't appear in the latest list from the
+                    // subscription service, or it's in the denylist
+                    if (!seenIds.contains(subId)
+                        || (productDenylist.productIdMatches(subEntity.getOffering().getSku()))) {
+                      subEntitiesForDeletion.add(subEntity);
+                      return;
+                    }
+
+                    // we've seen a newer version of the sub, but this version doesn't need updates
+                    if (dto == null) {
+                      return;
+                    }
+
+                    syncSubscription(dto, Optional.of(subEntity));
+                  });
+              subscriptionRepository.flush();
+              entityManager.clear();
+            });
+
+    // These are additional subs that should be sync'd but weren't previously in the database
+    Stream<Subscription> stream = subCompoundIdToDtoMap.values().stream();
+
+    CustomBatchIterator.batchStreamOf(stream, batchSize)
+        .forEach(
+            batch -> {
+              batch.forEach(dto -> syncSubscription(dto, Optional.empty()));
+
+              subscriptionRepository.flush();
+              entityManager.clear();
             });
 
     if (paygOnly) {
@@ -356,18 +389,13 @@ public class SubscriptionSyncController {
       return;
     }
 
-    var recordsToDelete =
-        swatchSubscriptions.values().stream()
-            .filter(sub -> !seenSubscriptionIds.contains(sub.getSubscriptionId()))
-            .toList();
-
-    if (!recordsToDelete.isEmpty()) {
-      log.info("Removing {} stale/incorrect subscription records", recordsToDelete.size());
+    if (!subEntitiesForDeletion.isEmpty()) {
+      log.info("Removing {} stale/incorrect subscription records", subEntitiesForDeletion.size());
     }
 
-    // anything remaining in the map at this point is stale. Measurements and subscription product
-    // ID objects should delete in a cascade.
-    subscriptionRepository.deleteAll(recordsToDelete);
+    subscriptionRepository.deleteAll(subEntitiesForDeletion);
+
+    log.info("Finished syncing subscriptions for orgId {}", orgId);
   }
 
   private boolean shouldSyncSub(Subscription sub) {
@@ -422,8 +450,9 @@ public class SubscriptionSyncController {
     return org.candlepin.subscriptions.db.model.Subscription.builder()
         .subscriptionId(String.valueOf(subscription.getId()))
         .subscriptionNumber(subscription.getSubscriptionNumber())
+        .subscriptionProductIds(
+            new HashSet<>(Collections.singleton(SubscriptionDtoUtil.extractSku(subscription))))
         .orgId(subscription.getWebCustomerId().toString())
-        .accountNumber(String.valueOf(subscription.getOracleAccountNumber()))
         .quantity(subscription.getQuantity())
         .startDate(clock.dateFromMilliseconds(subscription.getEffectiveStartDate()))
         .endDate(clock.dateFromMilliseconds(subscription.getEffectiveEndDate()))
@@ -465,7 +494,6 @@ public class SubscriptionSyncController {
         // NOTE: UMB messages don't include subscriptionId
         .subscriptionNumber(subscription.getSubscriptionNumber())
         .orgId(subscription.getWebCustomerId())
-        .accountNumber(String.valueOf(subscription.getEbsAccountNumber()))
         .quantity(subscription.getQuantity())
         .startDate(subscription.getEffectiveStartDateInUtc())
         .endDate(endDate)
@@ -486,7 +514,6 @@ public class SubscriptionSyncController {
     entity.setBillingProvider(newOrUpdated.getBillingProvider());
     entity.setBillingAccountId(newOrUpdated.getBillingAccountId());
     entity.setBillingProviderId(newOrUpdated.getBillingProviderId());
-    entity.setAccountNumber(newOrUpdated.getAccountNumber());
     entity.setOrgId(newOrUpdated.getOrgId());
     // recalculate the subscription measurements and product IDs in case those have changed
     capacityReconciliationController.reconcileCapacityForSubscription(entity);
@@ -501,6 +528,7 @@ public class SubscriptionSyncController {
           .forEach(
               subscription -> {
                 if (reconcileCapacity) {
+                  determineSubscriptionOffering(subscription);
                   capacityReconciliationController.reconcileCapacityForSubscription(subscription);
                 }
                 subscriptionRepository.save(subscription);
@@ -510,35 +538,56 @@ public class SubscriptionSyncController {
     }
   }
 
-  @Transactional
-  public void saveUmbSubscriptionFromXml(String subscriptionXml) throws JsonProcessingException {
-    saveUmbSubscription(
-        umbMessageMapper
-            .readValue(subscriptionXml, org.candlepin.subscriptions.umb.CanonicalMessage.class)
-            .getPayload()
-            .getSync()
-            .getSubscription());
+  private void determineSubscriptionOffering(
+      org.candlepin.subscriptions.db.model.Subscription subscription) {
+    // should look up the offering and set it before additional processing
+    var offer =
+        offeringRepository.findOfferingBySku(
+            subscription.getSubscriptionProductIds().stream()
+                .collect(MoreCollectors.toOptional())
+                .orElse(null));
+    if (Objects.nonNull(offer)) {
+      // should only be one offering per subscription
+      subscription.setOffering(offer);
+    } else {
+      throw new BadRequestException("Error offering doesn't exist");
+    }
   }
 
   @Transactional
   public void saveUmbSubscription(UmbSubscription umbSubscription) {
     org.candlepin.subscriptions.db.model.Subscription subscription = convertDto(umbSubscription);
-    syncSubscription(
-        umbSubscription.getSku(),
-        subscription,
-        subscriptionRepository.findBySubscriptionNumber(subscription.getSubscriptionNumber()));
-  }
 
-  public void deleteSubscription(String subscriptionId) {
-    subscriptionRepository.deleteBySubscriptionId(subscriptionId);
+    var subscriptions =
+        subscriptionRepository.findBySubscriptionNumber(subscription.getSubscriptionNumber());
+    if (subscriptions.size() > 1) {
+      log.warn(
+          "Skipping UMB message because multiple subscriptions were found for subscriptionNumber={}",
+          subscription.getSubscriptionNumber());
+    } else {
+      syncSubscription(umbSubscription.getSku(), subscription, subscriptions.stream().findFirst());
+    }
   }
 
   @Transactional
   public String terminateSubscription(String subscriptionId, OffsetDateTime terminationDate) {
-    var subscription =
-        subscriptionRepository
-            .findActiveSubscription(subscriptionId)
-            .orElseThrow(EntityNotFoundException::new);
+    var subscriptions = subscriptionRepository.findActiveSubscription(subscriptionId);
+    if (subscriptions.isEmpty()) {
+      throw new EntityNotFoundException(
+          String.format(
+              "Cannot terminate subscription because no active subscription was found with subscription ID '%s'",
+              subscriptionId));
+    } else if (subscriptions.size() > 1) {
+      throw new SubscriptionsException(
+          ErrorCode.UNHANDLED_EXCEPTION_ERROR,
+          Response.Status.INTERNAL_SERVER_ERROR,
+          "Multiple active subscription found",
+          String.format(
+              "Cannot terminate subscription because multiple active subscriptions were found for subscription ID '%s'",
+              subscriptionId));
+    }
+
+    var subscription = subscriptions.get(0);
 
     // Wait until after we are sure there's an offering for this subscription before setting the
     // end date.  We want validation to occur before we start mutating data.
@@ -549,9 +598,7 @@ public class SubscriptionSyncController {
     // between the two temporals. For example, the amount in hours between the times 11:30 and
     // 12:29 will zero hours as it is one minute short of an hour.
     var delta = Math.abs(ChronoUnit.HOURS.between(terminationDate, now));
-    var productTag =
-        tagProfile.tagForOfferingProductName(subscription.getOffering().getProductName());
-    if (tagProfile.isProductPAYGEligible(productTag) && delta > 0) {
+    if (subscription.getOffering().isMetered() && delta > 0) {
       var msg =
           String.format(
               "Subscription %s terminated at %s with out of range termination date %s.",
@@ -580,18 +627,13 @@ public class SubscriptionSyncController {
   }
 
   @Transactional
-  public List<org.candlepin.subscriptions.db.model.Subscription> findSubscriptionsAndSyncIfNeeded(
-      String accountNumber,
-      Optional<String> orgId,
-      Key usageKey,
-      OffsetDateTime rangeStart,
-      OffsetDateTime rangeEnd,
-      boolean paygOnly) {
+  public List<org.candlepin.subscriptions.db.model.Subscription> findSubscriptions(
+      Optional<String> orgId, Key usageKey, OffsetDateTime rangeStart, OffsetDateTime rangeEnd) {
     Assert.isTrue(Usage._ANY != usageKey.getUsage(), "Usage cannot be _ANY");
     Assert.isTrue(ServiceLevel._ANY != usageKey.getSla(), "Service Level cannot be _ANY");
 
     String productId = usageKey.getProductId();
-    Set<String> productNames = tagProfile.getOfferingProductNamesForTag(productId);
+    Set<String> productNames = Variant.getProductNamesForTag(productId);
     if (productNames.isEmpty()) {
       log.warn("No product names configured for tag: {}", productId);
       return Collections.emptyList();
@@ -611,32 +653,14 @@ public class SubscriptionSyncController {
             .ending(rangeEnd);
 
     DbReportCriteria subscriptionCriteria =
-        orgId
-            .map(id -> reportCriteriaBuilder.orgId(id).build())
-            .orElseGet(() -> reportCriteriaBuilder.accountNumber(accountNumber).build());
+        orgId.map(id -> reportCriteriaBuilder.orgId(id).build()).get();
 
     List<org.candlepin.subscriptions.db.model.Subscription> result =
         subscriptionRepository.findByCriteria(
             subscriptionCriteria, Sort.by(Subscription_.START_DATE).descending());
 
     if (result.isEmpty()) {
-      /* If we are missing the subscription, call out to the RhMarketplaceSubscriptionCollector
-      to fetch from Marketplace.  Sync all those subscriptions. Query again. */
-      if (orgId.isEmpty()) {
-        orgId = Optional.of(accountService.lookupOrgId(accountNumber));
-      }
-      log.info("Syncing subscriptions for account {} using orgId {}", accountNumber, orgId.get());
-      forceSyncSubscriptionsForOrg(orgId.get(), paygOnly);
-      result =
-          subscriptionRepository.findByCriteria(
-              subscriptionCriteria, Sort.by(Subscription_.START_DATE).descending());
-    }
-
-    if (result.isEmpty()) {
-      log.error(
-          "No subscription found for account {} with criteria {}",
-          accountNumber,
-          subscriptionCriteria);
+      log.error("No subscription found for orgId {} with criteria {}", orgId, subscriptionCriteria);
     }
 
     return result;
@@ -645,33 +669,36 @@ public class SubscriptionSyncController {
   /**
    * This will allow any service to look up the swatch product(s) associated with a given SKU. (This
    * lookup will use the offering information already stored in the database) and map the
-   * `product_name` to a swatch `product_tag` via info in `tag_profile.yaml` If the offering does
-   * not exist then return 404. If it does exist, then return an empty list if there are no tags
-   * found for that particular offering.
+   * `product_name` to a swatch `product_tag` via info from `swatch-product-configuration` library.
+   * If the offering does not exist then return 404. If it does exist, then return an empty list if
+   * there are no tags found for that particular offering.
    *
    * @param sku
    * @return OfferingProductTags
    */
   public OfferingProductTags findProductTags(String sku) {
     OfferingProductTags productTags = new OfferingProductTags();
-    var productTag = offeringRepository.findProductNameBySku(sku);
-    if (productTag.isPresent()) {
-      if (StringUtils.hasText(tagProfile.tagForOfferingProductName(productTag.get()))) {
-        return productTags.data(List.of(tagProfile.tagForOfferingProductName(productTag.get())));
-      }
-    } else {
+    var offering = offeringRepository.findOfferingBySku(sku);
+    if (offering == null) {
       throw new MissingOfferingException(
           ErrorCode.OFFERING_MISSING_ERROR,
           Response.Status.NOT_FOUND,
           String.format("Sku %s not found in Offering", sku),
           null);
     }
-    return productTags;
-  }
 
-  public List<TagMetric> getMetricsForTag(String tag) {
-    return tagProfile.getTagMetrics().stream()
-        .filter(tagMetric -> Objects.equals(tagMetric.getTag(), tag))
-        .toList();
+    // lookup product tags by either role or eng IDs
+    SubscriptionDefinition.getAllProductTagsWithPaygEligibleByRoleOrEngIds(
+            offering.getRole(), offering.getProductIds())
+        .forEach(productTags::addDataItem);
+    // if not found, let's use the product name
+    if (offering.isMetered()
+        && (productTags.getData() == null || productTags.getData().isEmpty())
+        && StringUtils.isNotEmpty(offering.getProductName())) {
+      Variant.findByProductName(offering.getProductName())
+          .ifPresent(v -> productTags.addDataItem(v.getTag()));
+    }
+
+    return productTags;
   }
 }

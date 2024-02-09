@@ -20,6 +20,9 @@
  */
 package org.candlepin.subscriptions.db;
 
+import static org.hibernate.jpa.AvailableHints.HINT_FETCH_SIZE;
+
+import jakarta.persistence.QueryHint;
 import jakarta.persistence.criteria.CriteriaBuilder;
 import jakarta.persistence.criteria.Path;
 import jakarta.persistence.criteria.Predicate;
@@ -27,7 +30,6 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 import org.candlepin.subscriptions.db.model.BillingProvider;
@@ -35,7 +37,7 @@ import org.candlepin.subscriptions.db.model.DbReportCriteria;
 import org.candlepin.subscriptions.db.model.Offering_;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.Subscription;
-import org.candlepin.subscriptions.db.model.SubscriptionProductId_;
+import org.candlepin.subscriptions.db.model.SubscriptionMeasurementKey_;
 import org.candlepin.subscriptions.db.model.Subscription_;
 import org.candlepin.subscriptions.db.model.Usage;
 import org.springframework.data.domain.Page;
@@ -46,6 +48,7 @@ import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.util.ObjectUtils;
 
@@ -54,37 +57,51 @@ public interface SubscriptionRepository
     extends JpaRepository<Subscription, Subscription.SubscriptionCompoundId>,
         JpaSpecificationExecutor<Subscription> {
 
+  // Added an order by clause to avoid Hibernate issue HHH-17040
   @Query(
       """
         SELECT s FROM Subscription s
         WHERE (s.endDate IS NULL OR s.endDate > CURRENT_TIMESTAMP)
           AND s.subscriptionId = :subscriptionId
+        ORDER BY s.subscriptionId, s.startDate
       """)
   @EntityGraph(value = "graph.SubscriptionSync")
-  Optional<Subscription> findActiveSubscription(@Param("subscriptionId") String subscriptionId);
+  List<Subscription> findActiveSubscription(@Param("subscriptionId") String subscriptionId);
 
   @EntityGraph(value = "graph.SubscriptionSync")
-  Optional<Subscription> findBySubscriptionNumber(String subscriptionNumber);
+  // Added an order by clause to avoid Hibernate issue HHH-17040
+  @Query(
+      "SELECT s FROM Subscription s WHERE s.subscriptionNumber = :subscriptionNumber ORDER BY s.subscriptionId, s.startDate")
+  List<Subscription> findBySubscriptionNumber(String subscriptionNumber);
 
-  @EntityGraph(value = "graph.SubscriptionSync")
+  // Added an order by clause to avoid Hibernate issue HHH-17040
+  @Query(
+      "SELECT s FROM Subscription s LEFT JOIN FETCH s.offering o WHERE o.sku = :sku ORDER BY s.subscriptionId, s.startDate")
   Page<Subscription> findByOfferingSku(String sku, Pageable pageable);
 
+  @QueryHints(value = {@QueryHint(name = HINT_FETCH_SIZE, value = "1024")})
   @EntityGraph(value = "graph.SubscriptionSync")
-  @Query("SELECT DISTINCT s FROM Subscription s WHERE s.orgId = :orgId")
+  // Added an order by clause to avoid Hibernate issue HHH-17040
+  @Query(
+      "SELECT s FROM Subscription s WHERE s.orgId = :orgId ORDER BY s.subscriptionId, s.startDate")
   Stream<Subscription> findByOrgId(String orgId);
 
   void deleteBySubscriptionId(String subscriptionId);
 
   void deleteByOrgId(String orgId);
 
-  private Specification<Subscription> buildSearchSpecification(DbReportCriteria dbReportCriteria) {
+  static Specification<Subscription> buildSearchSpecification(DbReportCriteria dbReportCriteria) {
     /* The where call allows us to build a Specification object to operate on even if the first
      * specification method we call returns null (which it won't in this case, but it's good
-     * practice to handle it. */
+     * practice to handle it). */
     Specification<Subscription> searchCriteria =
         (root, query, builder) -> {
           // fetch offering always, to eliminate n+1 on offering
           root.fetch(Subscription_.offering);
+          // Added an order by clause to avoid Hibernate issue HHH-17040
+          query.orderBy(
+              builder.asc(root.get(Subscription_.subscriptionId)),
+              builder.asc(root.get(Subscription_.startDate)));
           return null;
         };
     searchCriteria =
@@ -94,8 +111,6 @@ public interface SubscriptionRepository
                     dbReportCriteria.getBeginning(), dbReportCriteria.getEnding())));
     if (Objects.nonNull(dbReportCriteria.getOrgId())) {
       searchCriteria = searchCriteria.and(orgIdEquals(dbReportCriteria.getOrgId()));
-    } else {
-      searchCriteria = searchCriteria.and(accountNumberEquals(dbReportCriteria.getAccountNumber()));
     }
     if (dbReportCriteria.isPayg()) {
       // NOTE: we expect payg subscription records to always populate billingProviderId
@@ -124,7 +139,14 @@ public interface SubscriptionRepository
     if (Objects.nonNull(dbReportCriteria.getBillingAccountId())
         && !dbReportCriteria.getBillingAccountId().equals("_ANY")) {
       searchCriteria =
-          searchCriteria.and(billingAccountIdEquals(dbReportCriteria.getBillingAccountId()));
+          searchCriteria.and(billingAccountIdLike(dbReportCriteria.getBillingAccountId()));
+    }
+    if (Objects.nonNull(dbReportCriteria.getMetricId())
+        || Objects.nonNull(dbReportCriteria.getHypervisorReportCategory())) {
+      searchCriteria =
+          searchCriteria.and(
+              metricsCriteria(
+                  dbReportCriteria.getHypervisorReportCategory(), dbReportCriteria.getMetricId()));
     }
 
     return searchCriteria;
@@ -139,6 +161,10 @@ public interface SubscriptionRepository
   default List<Subscription> findByCriteria(DbReportCriteria dbReportCriteria, Sort sort) {
     return findAll(buildSearchSpecification(dbReportCriteria), sort);
   }
+
+  @Override
+  @EntityGraph(attributePaths = {"subscriptionMeasurements"})
+  List<Subscription> findAll(Specification<Subscription> spec, Sort sort);
 
   private static Specification<Subscription> hasUnlimitedUsage() {
     return (root, query, builder) -> {
@@ -163,15 +189,9 @@ public interface SubscriptionRepository
 
   private static Specification<Subscription> productIdEquals(String productId) {
     return (root, query, builder) -> {
-      var subscriptionProductIdRoot = root.join(Subscription_.subscriptionProductIds);
-      return builder.equal(
-          subscriptionProductIdRoot.get(SubscriptionProductId_.productId), productId);
+      var productIdsPath = root.join(Subscription_.subscriptionProductIds);
+      return builder.equal(productIdsPath, productId);
     };
-  }
-
-  private static Specification<Subscription> accountNumberEquals(String accountNumber) {
-    return (root, query, builder) ->
-        builder.equal(root.get(Subscription_.accountNumber), accountNumber);
   }
 
   private static Specification<Subscription> orgIdEquals(String orgId) {
@@ -181,21 +201,44 @@ public interface SubscriptionRepository
   /**
    * This method looks for subscriptions that are active between the two dates given. The logic is
    * not intuitive: subscription_begin &lt;= report_end && (subscription_end &gt;= report_begin OR
-   * subscription_end IS NULL). See {@link
-   * SubscriptionMeasurementRepository#subscriptionIsActiveBetween(OffsetDateTime, OffsetDateTime)}
-   * for a detailed explanation of how this predicate is derived.
+   * subscription_end IS NULL).
+   *
+   * <p>There are four points that need to be considered: the subscription begin date (Sb), the
+   * subscription end date (Se), the report begin date (Rb), and the report end date (Re). Those
+   * dates can be in five different relationships.
+   *
+   * <ol>
+   *   <li>Sb Se Rb Re (a subscription that expires before the report period even starts
+   *   <li>Sb Rb Se Re (a subscription that has started before the report period and ends during it.
+   *   <li>Rb Sb Se Re (a subscription that falls entirely within the report period)
+   *   <li>Rb Sb Re Se (a subscription that starts inside the report period but continues past the
+   *       end of the period)
+   *   <li>Rb Re Sb Se (a subscription that does not start until after the period has already ended)
+   * </ol>
+   *
+   * <p>We want this method to return subscriptions that are active within the report period. That
+   * means cases 2, 3, and 4. Here are the relationships for those cases:
+   *
+   * <ol>
+   *   <li>Sb &lt; Rb, Sb &lt; Re, Se &gt; Rb, Se &lt; Re
+   *   <li>Sb &gt; Rb, Sb &lt; Re, Se &gt; Rb, Se &lt; Re
+   *   <li>Sb &gt; Rb, Sb &lt; Re, Se &gt; Rb, Se &gt; Re
+   * </ol>
+   *
+   * <p>Looking at those inequalities, we can see that the two invariant relationships are Sb &lt;
+   * Re and Se &gt; Rb. Then we add the "or equal to" to the inequalities to capture edge cases.
    *
    * @param reportStart the date the reporting period starts
    * @param reportEnd the date the reporting period ends
    * @return A Specification that determines if a subscription is active during the given period.
    */
-  static Specification<Subscription> subscriptionIsActiveBetween(
+  private static Specification<Subscription> subscriptionIsActiveBetween(
       OffsetDateTime reportStart, OffsetDateTime reportEnd) {
     return (root, query, builder) ->
         predicateForSubscriptionIsActiveBetween(root, builder, reportStart, reportEnd);
   }
 
-  static Predicate predicateForSubscriptionIsActiveBetween(
+  private static Predicate predicateForSubscriptionIsActiveBetween(
       Path<Subscription> path,
       CriteriaBuilder builder,
       OffsetDateTime reportStart,
@@ -233,8 +276,34 @@ public interface SubscriptionRepository
         builder.equal(root.get(Subscription_.billingProvider), billingProvider);
   }
 
-  private static Specification<Subscription> billingAccountIdEquals(String billingAccountId) {
+  private static Specification<Subscription> billingAccountIdLike(String billingAccountId) {
     return (root, query, builder) ->
-        builder.equal(root.get(Subscription_.billingAccountId), billingAccountId);
+        // If multiple ID's exist, match on firstID or firstID;secondID (azureTenantId or
+        // azureTenantId;azureSubscriptionId)
+        builder.like(root.get(Subscription_.billingAccountId), billingAccountId + "%");
+  }
+
+  private static Specification<Subscription> metricsCriteria(
+      HypervisorReportCategory hypervisorReportCategory, String metricId) {
+    return (root, query, builder) -> {
+      var predicates = new ArrayList<Predicate>();
+      var measurementKeyPath = root.join(Subscription_.subscriptionMeasurements).key();
+      if (hypervisorReportCategory != null) {
+        var measurementType =
+            switch (hypervisorReportCategory) {
+              case NON_HYPERVISOR -> "PHYSICAL";
+              case HYPERVISOR -> "HYPERVISOR";
+            };
+        predicates.add(
+            builder.equal(
+                measurementKeyPath.get(SubscriptionMeasurementKey_.measurementType),
+                measurementType));
+      }
+      if (metricId != null) {
+        predicates.add(
+            builder.equal(measurementKeyPath.get(SubscriptionMeasurementKey_.metricId), metricId));
+      }
+      return builder.and(predicates.toArray(Predicate[]::new));
+    };
   }
 }

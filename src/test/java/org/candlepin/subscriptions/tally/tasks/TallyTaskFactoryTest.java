@@ -25,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import org.candlepin.subscriptions.tally.TallyTaskFactory;
 import org.candlepin.subscriptions.task.TaskDescriptor;
-import org.candlepin.subscriptions.task.TaskType;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -38,18 +37,8 @@ class TallyTaskFactoryTest {
   @Autowired private TallyTaskFactory factory;
 
   @Test
-  void ensureFactoryBuildsUpdateAccountSnapshotTask() {
-    TaskDescriptor task = TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, "accounts").build();
-    assertThrows(
-        IllegalArgumentException.class,
-        () -> {
-          factory.build(task);
-        });
-  }
-
-  @Test
   void ensureIllegalArgumentExceptionWhenTaskTypeIsNull() {
-    TaskDescriptor task = TaskDescriptor.builder(null, "my-group").build();
+    TaskDescriptor task = TaskDescriptor.builder(null, "my-group", null).build();
     assertThrows(
         IllegalArgumentException.class,
         () -> {

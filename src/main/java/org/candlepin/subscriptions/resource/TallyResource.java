@@ -20,18 +20,21 @@
  */
 package org.candlepin.subscriptions.resource;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.registry.ProductId;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinitionGranularity;
+import com.redhat.swatch.configuration.registry.Variant;
 import com.redhat.swatch.contracts.api.resources.CapacityApi;
 import com.redhat.swatch.contracts.client.ApiException;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotNull;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.InternalServerErrorException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.UriInfo;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Collections;
-import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -40,18 +43,23 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.TallySnapshotRepository;
 import org.candlepin.subscriptions.db.model.*;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.resteasy.PageLinkCreator;
 import org.candlepin.subscriptions.security.auth.ReportingAccessRequired;
 import org.candlepin.subscriptions.tally.filler.ReportFiller;
 import org.candlepin.subscriptions.tally.filler.ReportFillerFactory;
-import org.candlepin.subscriptions.util.ApplicationClock;
-import org.candlepin.subscriptions.utilization.api.model.*;
-import org.candlepin.subscriptions.utilization.api.model.TallySnapshot;
+import org.candlepin.subscriptions.tally.filler.UnroundedTallyReportDataPoint;
+import org.candlepin.subscriptions.utilization.api.model.BillingCategory;
+import org.candlepin.subscriptions.utilization.api.model.BillingProviderType;
+import org.candlepin.subscriptions.utilization.api.model.GranularityType;
+import org.candlepin.subscriptions.utilization.api.model.ReportCategory;
+import org.candlepin.subscriptions.utilization.api.model.ServiceLevelType;
+import org.candlepin.subscriptions.utilization.api.model.TallyReportData;
+import org.candlepin.subscriptions.utilization.api.model.TallyReportDataMeta;
+import org.candlepin.subscriptions.utilization.api.model.TallyReportTotalMonthly;
+import org.candlepin.subscriptions.utilization.api.model.UsageType;
 import org.candlepin.subscriptions.utilization.api.resources.TallyApi;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -73,7 +81,6 @@ public class TallyResource implements TallyApi {
   private final TallySnapshotRepository repository;
   private final PageLinkCreator pageLinkCreator;
   private final ApplicationClock clock;
-  private final TagProfile tagProfile;
   private final CapacityApi capacityApi;
 
   @Context private UriInfo uriInfo;
@@ -83,12 +90,10 @@ public class TallyResource implements TallyApi {
       TallySnapshotRepository repository,
       PageLinkCreator pageLinkCreator,
       ApplicationClock clock,
-      TagProfile tagProfile,
       CapacityApi capacityApi) {
     this.repository = repository;
     this.pageLinkCreator = pageLinkCreator;
     this.clock = clock;
-    this.tagProfile = tagProfile;
     this.capacityApi = capacityApi;
   }
 
@@ -109,6 +114,12 @@ public class TallyResource implements TallyApi {
       Integer limit,
       Boolean useRunningTotalsFormat,
       BillingCategory billingCategory) {
+
+    if (Objects.nonNull(billingCategory) && !Boolean.TRUE.equals(useRunningTotalsFormat)) {
+      throw new BadRequestException(
+          "When `billing_category` is specified, `use_running_totals_format` must be `true`.");
+    }
+
     ReportCriteria reportCriteria =
         extractReportCriteria(
             productId,
@@ -124,11 +135,6 @@ public class TallyResource implements TallyApi {
             billingCategory,
             offset,
             limit);
-
-    if (Objects.nonNull(billingCategory) && !Boolean.TRUE.equals(useRunningTotalsFormat)) {
-      throw new BadRequestException(
-          "When `billing_category` is specified, `use_running_totals_format` must be `true`.");
-    }
 
     Page<org.candlepin.subscriptions.db.model.TallySnapshot> snapshotPage =
         repository.findSnapshot(
@@ -158,21 +164,18 @@ public class TallyResource implements TallyApi {
                 usageType)
             : Collections.emptyMap();
 
-    Uom uom = Uom.fromValue(metricId.toString());
-
     List<org.candlepin.subscriptions.db.model.TallySnapshot> snapshots =
-        snapshotPage.stream().collect(Collectors.toList());
+        snapshotPage.stream().toList();
 
-    List<TallyReportDataPoint> snaps =
+    List<UnroundedTallyReportDataPoint> snaps =
         snapshots.stream()
-            .map(snapshot -> dataPointFromSnapshot(uom, category, snapshot))
+            .map(snapshot -> unroundedDataPointFromSnapshot(metricId, category, snapshot))
             .collect(Collectors.toList());
 
     TallyReportData report = new TallyReportData();
-    report.setData(snaps);
     report.setMeta(new TallyReportDataMeta());
     report.getMeta().setGranularity(reportCriteria.getGranularity().asOpenApiEnum());
-    report.getMeta().setProduct(productId);
+    report.getMeta().setProduct(productId.toString());
     report.getMeta().setMetricId(metricId.toString());
     report.getMeta().setServiceLevel(sla);
     report.getMeta().setUsage(usageType == null ? null : reportCriteria.getUsage().asOpenApiEnum());
@@ -201,12 +204,12 @@ public class TallyResource implements TallyApi {
       OffsetDateTime latestSnapshotDate = null;
       var totalMonthlyValueRaw = 0.0;
       for (var snapshot : snapshots) {
-        totalMonthlyValueRaw += extractRawValue(uom, category, snapshot);
+        totalMonthlyValueRaw += extractRawValue(metricId, category, snapshot);
         latestSnapshotDate = snapshot.getSnapshotDate();
       }
       var totalMonthlyValue = (int) Math.ceil(totalMonthlyValueRaw);
-      TallyReportDataPoint totalMonthly =
-          new TallyReportDataPoint()
+      TallyReportTotalMonthly totalMonthly =
+          new TallyReportTotalMonthly()
               .hasData(!snapshots.isEmpty())
               .value(totalMonthlyValue)
               .date(latestSnapshotDate);
@@ -222,20 +225,24 @@ public class TallyResource implements TallyApi {
     }
 
     if (Boolean.TRUE.equals(useRunningTotalsFormat)) {
-      transformToRunningTotalFormat(report, uom, billingCategory, capacityByDate);
+      snaps = transformToRunningTotalFormat(snaps, metricId, billingCategory, capacityByDate);
     }
 
     // Fill the report gaps if no paging was requested.
+    List<UnroundedTallyReportDataPoint> dataPointsToConvert;
     if (reportCriteria.getPageable() == null) {
-      ReportFiller<TallyReportDataPoint> reportFiller =
+      ReportFiller<UnroundedTallyReportDataPoint> reportFiller =
           ReportFillerFactory.getDataPointReportFiller(clock, reportCriteria.getGranularity());
-      report.setData(
+      dataPointsToConvert =
           reportFiller.fillGaps(
-              report.getData(),
-              beginning,
-              ending,
-              Objects.requireNonNullElse(useRunningTotalsFormat, false)));
+              snaps, beginning, ending, Objects.requireNonNullElse(useRunningTotalsFormat, false));
+    } else {
+      dataPointsToConvert = snaps;
     }
+    report.setData(
+        dataPointsToConvert.stream()
+            .map(UnroundedTallyReportDataPoint::toRoundedDataPoint)
+            .toList());
 
     // Set the count last since the report may have gotten filled.
     report.getMeta().setCount(report.getData().size());
@@ -259,8 +266,8 @@ public class TallyResource implements TallyApi {
     try {
       capacityReportByMetricId =
           capacityApi.getCapacityReportByMetricId(
-              com.redhat.swatch.contracts.api.model.ProductId.valueOf(productId.name()),
-              com.redhat.swatch.contracts.api.model.MetricId.valueOf(metricId.name()),
+              productId.toString(),
+              metricId.getValue(),
               com.redhat.swatch.contracts.api.model.GranularityType.valueOf(granularityType.name()),
               beginning,
               ending,
@@ -316,16 +323,18 @@ public class TallyResource implements TallyApi {
     BillingProvider providerType = ResourceUtils.sanitizeBillingProvider(billingProviderType);
     String sanitizedBillingAcctId = ResourceUtils.sanitizeBillingAccountId(billingAccountId);
 
-    try {
-      /* Throw an error if we are asked to return reports at a finer grain than what is supported by
-       * product.  Ideally, those reports should not even exist, but we want to inform the user that
-       * their request is a non sequitur. */
-      tagProfile.validateGranularityCompatibility(productId, granularityFromValue);
-    } catch (IllegalStateException e) {
+    /* Throw an error if we are asked to return reports at a finer grain than what is supported by
+     * product.  Ideally, those reports should not even exist, but we want to inform the user that
+     * their request is a non sequitur. */
+    if (!Variant.isGranularityCompatible(
+        productId.toString(), SubscriptionDefinitionGranularity.valueOf(granularityType.name()))) {
       // Combined with our logging configuration, this tells the OnMdcEvaluator class to suppress
       // the stacktrace
       MDC.put("INVALID_GRANULARITY", Boolean.TRUE.toString());
-      throw new BadRequestException(e.getMessage());
+      throw new BadRequestException(
+          String.format(
+              "%s does not support any granularity finer than %s",
+              productId, granularityFromValue.getValue()));
     }
     return ReportCriteria.builder()
         .orgId(ResourceUtils.getOrgId())
@@ -344,30 +353,22 @@ public class TallyResource implements TallyApi {
         .build();
   }
 
-  private TallyReportDataPoint dataPointFromSnapshot(
-      Uom uom,
+  private UnroundedTallyReportDataPoint unroundedDataPointFromSnapshot(
+      MetricId metricId,
       ReportCategory category,
       org.candlepin.subscriptions.db.model.TallySnapshot snapshot) {
-    return new TallyReportDataPoint()
-        .date(snapshot.getSnapshotDate())
-        .value(extractValue(uom, category, snapshot))
-        .hasData(true);
-  }
-
-  private int extractValue(
-      Uom uom,
-      ReportCategory category,
-      org.candlepin.subscriptions.db.model.TallySnapshot snapshot) {
-    return (int) Math.ceil(extractRawValue(uom, category, snapshot));
+    return new UnroundedTallyReportDataPoint(
+        snapshot.getSnapshotDate(), extractRawValue(metricId, category, snapshot), true);
   }
 
   private Double extractRawValue(
-      Uom uom,
+      MetricId metricId,
       ReportCategory category,
       org.candlepin.subscriptions.db.model.TallySnapshot snapshot) {
     Set<HardwareMeasurementType> contributingTypes = getContributingTypes(category);
     return contributingTypes.stream()
-        .mapToDouble(type -> Optional.ofNullable(snapshot.getMeasurement(type, uom)).orElse(0.0))
+        .mapToDouble(
+            type -> Optional.ofNullable(snapshot.getMeasurement(type, metricId)).orElse(0.0))
         .sum();
   }
 
@@ -381,137 +382,31 @@ public class TallyResource implements TallyApi {
     return contributingTypes;
   }
 
-  @SuppressWarnings("linelength")
-  @Override
-  @ReportingAccessRequired
-  public TallyReport getTallyReport(
-      ProductId productId,
-      @NotNull GranularityType granularityType,
-      @NotNull OffsetDateTime beginning,
-      @NotNull OffsetDateTime ending,
-      Integer offset,
-      @Min(1) Integer limit,
-      ServiceLevelType sla,
-      UsageType usageType,
-      Boolean useRunningTotalsFormat) {
-    ReportCriteria reportCriteria =
-        extractReportCriteria(
-            productId,
-            null,
-            granularityType,
-            beginning,
-            ending,
-            null,
-            sla,
-            usageType,
-            null,
-            null,
-            null,
-            offset,
-            limit);
-
-    Page<org.candlepin.subscriptions.db.model.TallySnapshot> snapshotPage =
-        repository.findSnapshot(
-            reportCriteria.getOrgId(),
-            reportCriteria.getProductId(),
-            reportCriteria.getGranularity(),
-            reportCriteria.getServiceLevel(),
-            reportCriteria.getUsage(),
-            reportCriteria.getBillingProvider(),
-            reportCriteria.getBillingAccountId(),
-            reportCriteria.getBeginning(),
-            reportCriteria.getEnding(),
-            reportCriteria.getPageable());
-
-    List<TallySnapshot> snaps =
-        snapshotPage.stream()
-            .map(org.candlepin.subscriptions.db.model.TallySnapshot::asApiSnapshot)
-            .collect(Collectors.toList());
-
-    TallyReport report = new TallyReport();
-    report.setData(snaps);
-    report.setMeta(new TallyReportMeta());
-    report.getMeta().setGranularity(reportCriteria.getGranularity().asOpenApiEnum());
-    report.getMeta().setProduct(productId);
-    report.getMeta().setServiceLevel(sla);
-    report.getMeta().setUsage(usageType == null ? null : reportCriteria.getUsage().asOpenApiEnum());
-    report.getMeta().setTotalCoreHours(getTotalCoreHours(report));
-    report.getMeta().setTotalInstanceHours(getTotalInstanceHours(report));
-
-    if (Boolean.TRUE.equals(useRunningTotalsFormat)) {
-      transformToRunningTotalFormat(report);
-    }
-
-    // Only set page links if we are paging (not filling).
-    if (reportCriteria.getPageable() != null) {
-      report.setLinks(pageLinkCreator.getPaginationLinks(uriInfo, snapshotPage));
-    }
-
-    // Fill the report gaps if no paging was requested.
-    if (reportCriteria.getPageable() == null) {
-      ReportFiller<TallySnapshot> reportFiller =
-          ReportFillerFactory.getInstance(clock, reportCriteria.getGranularity());
-      report.setData(
-          reportFiller.fillGaps(report.getData(), beginning, ending, useRunningTotalsFormat));
-    }
-
-    // Set the count last since the report may have gotten filled.
-    report.getMeta().setCount(report.getData().size());
-
-    return report;
-  }
-
-  private Double getTotalCoreHours(TallyReport report) {
-    return report.getData().stream()
-        .mapToDouble(snapshot -> Optional.ofNullable(snapshot.getCoreHours()).orElse(0.0))
-        .sum();
-  }
-
-  private Double getTotalInstanceHours(TallyReport report) {
-    return report.getData().stream()
-        .mapToDouble(snapshot -> Optional.ofNullable(snapshot.getInstanceHours()).orElse(0.0))
-        .sum();
-  }
-
-  private void transformToRunningTotalFormat(TallyReport report) {
-    Map<Uom, Double> runningTotals = new EnumMap<>(Measurement.Uom.class);
-    report
-        .getData()
-        .forEach(
-            snapshot -> {
-              double snapshotHours = Optional.ofNullable(snapshot.getCoreHours()).orElse(0.0);
-              Double newValue =
-                  runningTotals.getOrDefault(Measurement.Uom.CORES, 0.0) + snapshotHours;
-              snapshot.setCoreHours(newValue);
-              runningTotals.put(Measurement.Uom.CORES, newValue);
-            });
-  }
-
-  private void transformToRunningTotalFormat(
-      TallyReportData report,
-      Uom uom,
+  private List<UnroundedTallyReportDataPoint> transformToRunningTotalFormat(
+      List<UnroundedTallyReportDataPoint> snaps,
+      MetricId metricId,
       BillingCategory billingCategory,
       Map<OffsetDateTime, Integer> capacityByDate) {
-    Map<Uom, Integer> runningTotals = new EnumMap<>(Measurement.Uom.class);
-    report
-        .getData()
-        .forEach(
-            snapshot -> {
-              int snapshotTotal = Optional.ofNullable(snapshot.getValue()).orElse(0);
-              Integer newValue = runningTotals.getOrDefault(uom, 0) + snapshotTotal;
+    Map<MetricId, Double> runningTotals = new HashMap<>();
+    List<UnroundedTallyReportDataPoint> runningTotalSnaps = new ArrayList<>();
+    snaps.forEach(
+        snapshot -> {
+          double snapshotTotal = Optional.ofNullable(snapshot.value()).orElse(0.0);
+          double newValue = runningTotals.getOrDefault(metricId, 0.0) + snapshotTotal;
 
-              int snapshotValue = newValue;
-              Integer capacity =
-                  Optional.ofNullable(capacityByDate.get(clock.startOfDay(snapshot.getDate())))
-                      .orElse(0);
-              if (BillingCategory.PREPAID.equals(billingCategory)) {
-                snapshotValue = Math.min(newValue, capacity);
-              } else if (BillingCategory.ON_DEMAND.equals(billingCategory)) {
-                snapshotValue = Math.max(newValue - capacity, 0);
-              }
+          double snapshotValue = newValue;
+          double capacity = capacityByDate.getOrDefault(clock.startOfDay(snapshot.date()), 0);
+          if (BillingCategory.PREPAID.equals(billingCategory)) {
+            snapshotValue = Math.min(newValue, capacity);
+          } else if (BillingCategory.ON_DEMAND.equals(billingCategory)) {
+            snapshotValue = Math.max(newValue - capacity, 0);
+          }
 
-              snapshot.setValue(snapshotValue);
-              runningTotals.put(uom, newValue);
-            });
+          runningTotalSnaps.add(
+              new UnroundedTallyReportDataPoint(
+                  snapshot.date(), snapshotValue, snapshot.hasData()));
+          runningTotals.put(metricId, newValue);
+        });
+    return runningTotalSnaps;
   }
 }

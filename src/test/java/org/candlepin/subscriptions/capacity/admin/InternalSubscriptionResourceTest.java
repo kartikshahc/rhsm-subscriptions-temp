@@ -20,9 +20,10 @@
  */
 package org.candlepin.subscriptions.capacity.admin;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -35,6 +36,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.List;
+import org.candlepin.subscriptions.ApplicationProperties;
 import org.candlepin.subscriptions.capacity.CapacityReconciliationController;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.Subscription;
@@ -50,6 +52,7 @@ import org.candlepin.subscriptions.subscription.SubscriptionPruneController;
 import org.candlepin.subscriptions.subscription.SubscriptionSyncController;
 import org.candlepin.subscriptions.utilization.admin.api.model.AwsUsageContext;
 import org.candlepin.subscriptions.utilization.admin.api.model.RhmUsageContext;
+import org.candlepin.subscriptions.utilization.admin.api.model.RpcResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -65,24 +68,28 @@ import org.springframework.web.context.WebApplicationContext;
 @WebAppConfiguration
 @ActiveProfiles({"capacity-ingress", "test"})
 class InternalSubscriptionResourceTest {
+
+  private static final String SYNC_ORG_123 = "/internal/subscriptions/sync/org/123";
+
+  private final OffsetDateTime defaultEndDate =
+      OffsetDateTime.of(2022, 7, 22, 8, 0, 0, 0, ZoneOffset.UTC);
+  private final OffsetDateTime defaultLookUpDate =
+      OffsetDateTime.of(2022, 6, 22, 8, 0, 0, 0, ZoneOffset.UTC);
+
   @MockBean SubscriptionSyncController syncController;
   @MockBean SubscriptionPruneController subscriptionPruneController;
 
   @MockBean OfferingSyncController offeringSync;
 
   @MockBean CapacityReconciliationController capacityReconciliationController;
-  @MockBean TagMetricMapper tagMetricMapper;
+  @MockBean MetricMapper metricMapper;
   @Autowired SecurityProperties properties;
   @Autowired WebApplicationContext context;
   @Autowired InternalSubscriptionResource resource;
   @Autowired MeterRegistry meterRegistry;
+  @Autowired ApplicationProperties applicationProperties;
 
   private MockMvc mvc;
-  private static final String SYNC_ORG_123 = "/internal/subscriptions/sync/org/123";
-  private OffsetDateTime defaultEndDate =
-      OffsetDateTime.of(2022, 7, 22, 8, 0, 0, 0, ZoneOffset.UTC);
-  private OffsetDateTime defaultLookUpDate =
-      OffsetDateTime.of(2022, 6, 22, 8, 0, 0, 0, ZoneOffset.UTC);
 
   @BeforeEach
   public void setup() {
@@ -95,11 +102,11 @@ class InternalSubscriptionResourceTest {
 
   @Test
   void forceSyncForOrgShouldReturnSuccess() {
-    assertEquals("Sync started.", resource.forceSyncSubscriptionsForOrg("123"));
+    assertEquals(new RpcResponse(), resource.forceSyncSubscriptionsForOrg("123"));
   }
 
   @Test
-  void incrementsMissingCounter_WhenAccounNumberPresent() {
+  void incrementsMissingCounter_WhenAccountNumberPresent() {
     SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
     InternalSubscriptionResource resource =
         new InternalSubscriptionResource(
@@ -109,15 +116,15 @@ class InternalSubscriptionResourceTest {
             subscriptionPruneController,
             offeringSync,
             capacityReconciliationController,
-            tagMetricMapper);
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
+            metricMapper,
+            applicationProperties);
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
         .thenReturn(Collections.emptyList());
     assertThrows(
         NotFoundException.class,
         () ->
             resource.getAwsUsageContext(
-                null, defaultLookUpDate, "rhosak", "account123", "Premium", "Production", "123"));
+                defaultLookUpDate, "rosa", null, "Premium", "Production", "123"));
     Counter counter = meterRegistry.counter("swatch_missing_aws_subscription");
     assertEquals(1.0, counter.count());
   }
@@ -133,48 +140,17 @@ class InternalSubscriptionResourceTest {
             subscriptionPruneController,
             offeringSync,
             capacityReconciliationController,
-            tagMetricMapper);
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
+            metricMapper,
+            applicationProperties);
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
         .thenReturn(Collections.emptyList());
     assertThrows(
         NotFoundException.class,
         () ->
             resource.getAwsUsageContext(
-                "org123", defaultLookUpDate, "rhosak", null, "Premium", "Production", "123"));
+                defaultLookUpDate, "rosa", "org123", "Premium", "Production", "123"));
     Counter counter = meterRegistry.counter("swatch_missing_aws_subscription");
     assertEquals(1.0, counter.count());
-  }
-
-  @Test
-  void incrementsAmbiguousCounter_WhenAccounNumberPresent() {
-    SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
-    InternalSubscriptionResource resource =
-        new InternalSubscriptionResource(
-            meterRegistry,
-            syncController,
-            properties,
-            subscriptionPruneController,
-            offeringSync,
-            capacityReconciliationController,
-            tagMetricMapper);
-    Subscription sub1 = new Subscription();
-    sub1.setBillingProviderId("foo1;foo2;foo3");
-    sub1.setEndDate(defaultEndDate);
-    Subscription sub2 = new Subscription();
-    sub2.setBillingProviderId("bar1;bar2;bar3");
-    sub2.setEndDate(defaultEndDate);
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
-        .thenReturn(List.of(sub1, sub2));
-    AwsUsageContext awsUsageContext =
-        resource.getAwsUsageContext(
-            null, defaultLookUpDate, "rhosak", "account123", "Premium", "Production", "123");
-    Counter counter = meterRegistry.counter("swatch_ambiguous_aws_subscription");
-    assertEquals(1.0, counter.count());
-    assertEquals("foo1", awsUsageContext.getProductCode());
-    assertEquals("foo2", awsUsageContext.getCustomerId());
-    assertEquals("foo3", awsUsageContext.getAwsSellerAccountId());
   }
 
   @Test
@@ -188,19 +164,19 @@ class InternalSubscriptionResourceTest {
             subscriptionPruneController,
             offeringSync,
             capacityReconciliationController,
-            tagMetricMapper);
+            metricMapper,
+            applicationProperties);
     Subscription sub1 = new Subscription();
     sub1.setBillingProviderId("foo1;foo2;foo3");
     sub1.setEndDate(defaultEndDate);
     Subscription sub2 = new Subscription();
     sub2.setBillingProviderId("bar1;bar2;bar3");
     sub2.setEndDate(defaultEndDate);
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
         .thenReturn(List.of(sub1, sub2));
     AwsUsageContext awsUsageContext =
         resource.getAwsUsageContext(
-            "org123", defaultLookUpDate, "rhosak", null, "Premium", "Production", "123");
+            defaultLookUpDate, "rosa", "org123", "Premium", "Production", "123");
     Counter counter = meterRegistry.counter("swatch_ambiguous_aws_subscription");
     assertEquals(1.0, counter.count());
     assertEquals("foo1", awsUsageContext.getProductCode());
@@ -209,38 +185,12 @@ class InternalSubscriptionResourceTest {
   }
 
   @Test
-  void shouldThrowSubscriptionsExceptionForTerminatedSubscription_WhenAccounNumberPresent() {
-    var endDate = OffsetDateTime.of(2022, 1, 1, 6, 0, 0, 0, ZoneOffset.UTC);
-    Subscription sub1 = new Subscription();
-    sub1.setBillingProviderId("foo1;foo2;foo3");
-    sub1.setEndDate(endDate);
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
-        .thenReturn(List.of(sub1));
-
-    var lookupDate = endDate.plusMinutes(30);
-    var exception =
-        assertThrows(
-            SubscriptionsException.class,
-            () -> {
-              resource.getAwsUsageContext(
-                  null, lookupDate, "rhosak", "account123", "Premium", "Production", "123");
-            });
-
-    assertEquals(
-        ErrorCode.SUBSCRIPTION_RECENTLY_TERMINATED.getDescription(),
-        exception.getCode().getDescription());
-  }
-
-  @Test
   void shouldThrowSubscriptionsExceptionForTerminatedSubscription_WhenOrgIdPresent() {
     var endDate = OffsetDateTime.of(2022, 1, 1, 6, 0, 0, 0, ZoneOffset.UTC);
     Subscription sub1 = new Subscription();
     sub1.setBillingProviderId("foo1;foo2;foo3");
     sub1.setEndDate(endDate);
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
-        .thenReturn(List.of(sub1));
+    when(syncController.findSubscriptions(any(), any(), any(), any())).thenReturn(List.of(sub1));
 
     var lookupDate = endDate.plusMinutes(30);
     var exception =
@@ -248,33 +198,12 @@ class InternalSubscriptionResourceTest {
             SubscriptionsException.class,
             () -> {
               resource.getAwsUsageContext(
-                  "org123", lookupDate, "rhosak", null, "Premium", "Production", "123");
+                  lookupDate, "rosa", "org123", "Premium", "Production", "123");
             });
 
     assertEquals(
         ErrorCode.SUBSCRIPTION_RECENTLY_TERMINATED.getDescription(),
         exception.getCode().getDescription());
-  }
-
-  @Test
-  void shouldReturnActiveSubscriptionAndNotTerminated_WhenAccounNumberPresent() {
-    var endDate = OffsetDateTime.of(2022, 1, 1, 6, 0, 0, 0, ZoneOffset.UTC);
-    Subscription sub1 = new Subscription();
-    sub1.setBillingProviderId("foo1;foo2;foo3");
-    sub1.setEndDate(endDate);
-    Subscription sub2 = new Subscription();
-    sub2.setBillingProviderId("bar1;bar2;bar3");
-    sub2.setEndDate(endDate.plusMinutes(45));
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
-        .thenReturn(List.of(sub1, sub2));
-    var lookupDate = endDate.plusMinutes(30);
-    AwsUsageContext awsUsageContext =
-        resource.getAwsUsageContext(
-            null, lookupDate, "rhosak", null, "Premium", "Production", "123");
-    assertEquals("bar1", awsUsageContext.getProductCode());
-    assertEquals("bar2", awsUsageContext.getCustomerId());
-    assertEquals("bar3", awsUsageContext.getAwsSellerAccountId());
   }
 
   @Test
@@ -286,16 +215,29 @@ class InternalSubscriptionResourceTest {
     Subscription sub2 = new Subscription();
     sub2.setBillingProviderId("bar1;bar2;bar3");
     sub2.setEndDate(endDate.plusMinutes(45));
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
         .thenReturn(List.of(sub1, sub2));
     var lookupDate = endDate.plusMinutes(30);
     AwsUsageContext awsUsageContext =
-        resource.getAwsUsageContext(
-            "org123", lookupDate, "rhosak", null, "Premium", "Production", "123");
+        resource.getAwsUsageContext(lookupDate, "rosa", "org123", "Premium", "Production", "123");
     assertEquals("bar1", awsUsageContext.getProductCode());
     assertEquals("bar2", awsUsageContext.getCustomerId());
     assertEquals("bar3", awsUsageContext.getAwsSellerAccountId());
+  }
+
+  @Test
+  void azureUsageContextEncodesAttributes() {
+    var endDate = OffsetDateTime.of(2022, 1, 1, 6, 0, 0, 0, ZoneOffset.UTC);
+    Subscription sub = new Subscription();
+    sub.setBillingProviderId("resourceId;planId;offerId");
+    sub.setEndDate(endDate);
+    when(syncController.findSubscriptions(any(), any(), any(), any())).thenReturn(List.of(sub));
+    var azureUsageContext =
+        resource.getAzureMarketplaceContext(
+            endDate, "BASILISK", "org123", "Premium", "Production", "123");
+    assertEquals("resourceId", azureUsageContext.getAzureResourceId());
+    assertEquals("planId", azureUsageContext.getPlanId());
+    assertEquals("offerId", azureUsageContext.getOfferId());
   }
 
   @Test
@@ -336,10 +278,10 @@ class InternalSubscriptionResourceTest {
             subscriptionPruneController,
             offeringSync,
             capacityReconciliationController,
-            tagMetricMapper);
+            metricMapper,
+            applicationProperties);
 
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
         .thenReturn(Collections.emptyList());
 
     OffsetDateTime now = OffsetDateTime.now();
@@ -348,7 +290,7 @@ class InternalSubscriptionResourceTest {
     assertThrows(
         NotFoundException.class,
         () -> {
-          resource.getRhmUsageContext("org123", now, "productId", "", sla, usage);
+          resource.getRhmUsageContext("org123", now, "productId", sla, usage);
         });
 
     Counter counter = meterRegistry.counter("rhsm-subscriptions.marketplace.missing.subscription");
@@ -366,7 +308,8 @@ class InternalSubscriptionResourceTest {
             subscriptionPruneController,
             offeringSync,
             capacityReconciliationController,
-            tagMetricMapper);
+            metricMapper,
+            applicationProperties);
 
     Subscription sub1 = new Subscription();
     sub1.setBillingProviderId("account123");
@@ -378,8 +321,7 @@ class InternalSubscriptionResourceTest {
     sub2.setStartDate(OffsetDateTime.now());
     sub2.setEndDate(sub2.getStartDate().plusMonths(1));
 
-    when(syncController.findSubscriptionsAndSyncIfNeeded(
-            any(), any(), any(), any(), any(), anyBoolean()))
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
         .thenReturn(List.of(sub1, sub2));
 
     RhmUsageContext rhmUsageContext =
@@ -387,7 +329,6 @@ class InternalSubscriptionResourceTest {
             "org123",
             OffsetDateTime.now(),
             "productId",
-            "",
             ServiceLevel.PREMIUM.toString(),
             Usage.PRODUCTION.toString());
 
@@ -395,5 +336,82 @@ class InternalSubscriptionResourceTest {
         meterRegistry.counter("rhsm-subscriptions.marketplace.ambiguous.subscription");
     assertEquals(1.0, counter.count());
     assertEquals("account123", rhmUsageContext.getRhSubscriptionId());
+  }
+
+  @Test
+  void shouldThrowSubscriptionsExceptionForAmbiguousAzureBillingAccountId() {
+    Subscription sub1 = new Subscription();
+    sub1.setBillingProviderId("resourceId;planId;offerId");
+    sub1.setBillingAccountId("azureTenantId");
+    sub1.setEndDate(OffsetDateTime.now());
+    Subscription sub2 = new Subscription();
+    sub2.setBillingProviderId("resourceId2;planId;offerId");
+    sub2.setBillingAccountId("azureTenantId");
+    sub2.setEndDate(OffsetDateTime.now());
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
+        .thenReturn(List.of(sub1, sub2));
+
+    var lookupDate = OffsetDateTime.now().minusMinutes(30);
+    var exception =
+        assertThrows(
+            SubscriptionsException.class,
+            () -> {
+              resource.getAzureMarketplaceContext(
+                  lookupDate,
+                  "rosa",
+                  "org123",
+                  "Premium",
+                  "Production",
+                  "azureTenantId;azureSubscriptionId");
+            });
+
+    assertEquals(
+        ErrorCode.SUBSCRIPTION_CANNOT_BE_DETERMINED.getDescription(),
+        exception.getCode().getDescription());
+  }
+
+  @Test
+  void testShouldReturnSubscriptionWithPartialBillingAccountIdMatch() {
+    Subscription sub1 = new Subscription();
+    sub1.setBillingProviderId("resourceId1;planId;offerId");
+    sub1.setBillingAccountId("azureTenantId");
+    sub1.setEndDate(OffsetDateTime.now());
+    Subscription sub2 = new Subscription();
+    sub2.setBillingProviderId("resourceId2;planId;offerId");
+    sub2.setBillingAccountId("azureTenantId;azureSubscriptionId2");
+    sub2.setEndDate(OffsetDateTime.now());
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
+        .thenReturn(List.of(sub1, sub2));
+
+    var lookupDate = OffsetDateTime.now().minusMinutes(30);
+    var azureUsageContext =
+        resource.getAzureMarketplaceContext(
+            lookupDate, "BASILISK", "org123", "Premium", "Production", "azureTenantId");
+    assertEquals("resourceId1", azureUsageContext.getAzureResourceId());
+  }
+
+  @Test
+  void testShouldReturnSubscriptionWithExactBillingAccountIdMatch() {
+    Subscription sub1 = new Subscription();
+    sub1.setBillingProviderId("resourceId1;planId;offerId");
+    sub1.setBillingAccountId("azureTenantId");
+    sub1.setEndDate(OffsetDateTime.now());
+    Subscription sub2 = new Subscription();
+    sub2.setBillingProviderId("resourceId2;planId;offerId");
+    sub2.setBillingAccountId("azureTenantId;azureSubscriptionId2");
+    sub2.setEndDate(OffsetDateTime.now());
+    when(syncController.findSubscriptions(any(), any(), any(), any()))
+        .thenReturn(List.of(sub1, sub2));
+
+    var lookupDate = OffsetDateTime.now().minusMinutes(30);
+    var azureUsageContext =
+        resource.getAzureMarketplaceContext(
+            lookupDate,
+            "BASILISK",
+            "org123",
+            "Premium",
+            "Production",
+            "azureTenantId;azureSubscriptionId2");
+    assertEquals("resourceId2", azureUsageContext.getAzureResourceId());
   }
 }

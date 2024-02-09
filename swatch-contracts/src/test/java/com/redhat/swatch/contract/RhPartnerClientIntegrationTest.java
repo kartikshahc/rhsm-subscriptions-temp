@@ -36,7 +36,7 @@ import org.eclipse.microprofile.rest.client.inject.RestClient;
 import org.junit.jupiter.api.Test;
 
 @QuarkusTest
-@QuarkusTestResource(value = WireMockResource.class)
+@QuarkusTestResource(value = WireMockResource.class, restrictToAnnotatedClass = true)
 class RhPartnerClientIntegrationTest {
   @Inject @RestClient PartnerApi partnerApi;
 
@@ -56,7 +56,7 @@ class RhPartnerClientIntegrationTest {
     assertNotNull(rhEntitlements);
     assertNotNull(rhEntitlements.get(0));
     assertEquals("RH000000", rhEntitlements.get(0).getSku());
-    assertEquals("123456", rhEntitlements.get(0).getRedHatSubscriptionNumber());
+    assertEquals("123456", rhEntitlements.get(0).getSubscriptionNumber());
     var purchase = entitlement.getPurchase();
     assertNotNull(purchase);
     assertEquals("1234567890abcdefghijklmno", purchase.getVendorProductCode());

@@ -58,11 +58,17 @@ public class ApiSpecController {
   @Value("classpath:internal-tally-openapi.json")
   private Resource internalTallyApiJson;
 
-  @Value("classpath:internal-metering-api-spec.yaml")
-  private Resource internalMeteringApiYaml;
+  @Value("classpath:internal-billing-api-spec.yaml")
+  private Resource internalBillingApiYaml;
 
-  @Value("classpath:internal-metering-openapi.json")
-  private Resource internalMeteringApiJson;
+  @Value("classpath:internal-billing-openapi.json")
+  private Resource internalBillingApiJson;
+
+  @Value("classpath:internal-swatch-producer-red-hat-marketplace-openapi.json")
+  private Resource internalProducerRedHatMarketplaceApiYaml;
+
+  @Value("classpath:internal-producer-red-hat-marketplace-api-openapi.json")
+  private Resource internalProducerRedHatMarketplaceApiJson;
 
   private String getResourceAsString(Resource r) {
     try (InputStream is = r.getInputStream()) {
@@ -100,11 +106,19 @@ public class ApiSpecController {
     return getResourceAsString(internalTallyApiJson);
   }
 
-  public String getInternalMeteringApiYaml() {
-    return getResourceAsString(internalMeteringApiYaml);
+  public String getInternalBillingApiYaml() {
+    return getResourceAsString(internalBillingApiYaml);
   }
 
-  public String getInternalMeteringApiJson() {
-    return getResourceAsString(internalMeteringApiJson);
+  public String getInternalBillingApiJson() {
+    return getResourceAsString(internalBillingApiJson);
+  }
+
+  public String getInternalProducerRHMApiYaml() {
+    return getResourceAsString(internalProducerRedHatMarketplaceApiYaml);
+  }
+
+  public String getInternalProducerRHMApiJson() {
+    return getResourceAsString(internalProducerRedHatMarketplaceApiJson);
   }
 }

@@ -20,8 +20,13 @@
  */
 package org.candlepin.subscriptions.db;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -35,15 +40,19 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import org.candlepin.subscriptions.db.model.*;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.Measurement.Uom;
-import org.candlepin.subscriptions.resource.HostsResource;
-import org.candlepin.subscriptions.resource.InstancesResource;
+import org.candlepin.clock.ApplicationClock;
+import org.candlepin.subscriptions.db.model.AccountServiceInventory;
+import org.candlepin.subscriptions.db.model.AccountServiceInventoryId;
+import org.candlepin.subscriptions.db.model.BillingProvider;
+import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
+import org.candlepin.subscriptions.db.model.Host;
+import org.candlepin.subscriptions.db.model.HostApiProjection;
+import org.candlepin.subscriptions.db.model.HostHardwareType;
+import org.candlepin.subscriptions.db.model.HostTallyBucket;
+import org.candlepin.subscriptions.db.model.ServiceLevel;
+import org.candlepin.subscriptions.db.model.TallyHostView;
+import org.candlepin.subscriptions.db.model.Usage;
 import org.candlepin.subscriptions.test.TestClockConfiguration;
-import org.candlepin.subscriptions.util.ApplicationClock;
-import org.candlepin.subscriptions.utilization.api.model.HostReportSort;
-import org.candlepin.subscriptions.utilization.api.model.InstanceReportSort;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -51,7 +60,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
@@ -68,10 +76,11 @@ import org.springframework.transaction.annotation.Transactional;
 @TestInstance(Lifecycle.PER_CLASS)
 @Import(TestClockConfiguration.class)
 class HostRepositoryTest {
-  private final String RHEL = "RHEL";
-  private final String COOL_PROD = "COOL_PROD";
+  private static final String RHEL = "RHEL";
+  private static final String COOL_PROD = "COOL_PROD";
   private static final String DEFAULT_DISPLAY_NAME = "REDHAT_PWNS";
   private static final String SANITIZED_MISSING_DISPLAY_NAME = "";
+  private static final String SORT_BY_MONTHLY_TOTALS = "monthlyTotals";
 
   @Autowired private HostRepository repo;
   @Autowired private ApplicationClock clock;
@@ -111,7 +120,7 @@ class HostRepositoryTest {
     Host host9 = createHost("inventory9", "account123");
     Host host10 = createHost("inventory10", "account123");
 
-    for (Uom uom : Uom.values()) {
+    for (MetricId uom : MetricId.getAll()) {
       host8.addToMonthlyTotal(
           OffsetDateTime.of(LocalDateTime.of(2021, 1, 1, 0, 0, 0), ZoneOffset.UTC), uom, 100.0);
       host9.addToMonthlyTotal(
@@ -168,7 +177,6 @@ class HostRepositoryTest {
     OffsetDateTime expLastSeen = OffsetDateTime.now(clock.getClock());
     String expInventoryId = "INV";
     String expInsightsId = "INSIGHTS_ID";
-    String expAccount = "ACCT";
     String expOrg = "ORG";
     String expSubId = "SUB_ID";
     String expDisplayName = "HOST_DISPLAY";
@@ -181,14 +189,14 @@ class HostRepositoryTest {
     boolean expIsHypervisor = true;
     String expCloudProvider = "CLOUD_PROVIDER";
 
-    Host host = new Host(expInventoryId, expInsightsId, expAccount, expOrg, expSubId);
+    Host host = new Host(expInventoryId, expInsightsId, expOrg, expSubId);
     host.setBillingProvider(BillingProvider.RED_HAT);
     host.setBillingAccountId("_ANY");
     host.setNumOfGuests(expGuests);
     host.setDisplayName(expDisplayName);
     host.setLastSeen(expLastSeen);
-    host.setMeasurement(Uom.CORES, 12.0);
-    host.setMeasurement(Uom.SOCKETS, 12.0);
+    host.setMeasurement(MetricIdUtils.getCores().toString(), 12.0);
+    host.setMeasurement(MetricIdUtils.getSockets().toString(), 12.0);
     host.setHypervisor(expIsHypervisor);
     host.setUnmappedGuest(expUnmappedGuest);
     host.setCloudProvider(expCloudProvider);
@@ -243,7 +251,7 @@ class HostRepositoryTest {
   @Transactional
   @Test
   void testCreate() {
-    Host host = new Host("INV1", "HOST1", "my_acct", "my_org", "sub_id");
+    Host host = new Host("INV1", "HOST1", "my_org", "sub_id");
     host.setDisplayName(DEFAULT_DISPLAY_NAME);
     host.addBucket(
         "RHEL",
@@ -255,31 +263,31 @@ class HostRepositoryTest {
         4,
         2,
         HardwareMeasurementType.PHYSICAL);
-    host.setMeasurement(Measurement.Uom.CORES, 4.0);
+    host.setMeasurement(MetricIdUtils.getCores().toString(), 4.0);
     host.addToMonthlyTotal(
-        OffsetDateTime.parse("2021-02-26T01:00:00Z"), Measurement.Uom.CORES, 5.0);
+        OffsetDateTime.parse("2021-02-26T01:00:00Z"), MetricIdUtils.getCores(), 5.0);
     host = persistHosts(host).get(0);
 
     Optional<Host> result = repo.findById(host.getId());
     assertTrue(result.isPresent());
     Host saved = result.get();
     assertEquals(1, saved.getBuckets().size());
-    assertEquals(4.0, saved.getMeasurement(Measurement.Uom.CORES));
-    assertEquals(5.0, saved.getMonthlyTotal("2021-02", Measurement.Uom.CORES));
+    assertEquals(4.0, saved.getMeasurement(MetricIdUtils.getCores().toString()));
+    assertEquals(5.0, saved.getMonthlyTotal("2021-02", MetricIdUtils.getCores()));
   }
 
   @Transactional
   @Test
   void testUpdate() {
-    Host host = new Host("INV1", "HOST1", "my_acct", "my_org", "sub_id");
+    Host host = new Host("INV1", "HOST1", "my_org", "sub_id");
     host.setDisplayName(DEFAULT_DISPLAY_NAME);
-    host.setMeasurement(Uom.SOCKETS, 1.0);
-    host.setMeasurement(Uom.CORES, 1.0);
-    host.setMeasurement(Measurement.Uom.CORES, 2.0);
+    host.setMeasurement(MetricIdUtils.getSockets().toString(), 1.0);
+    host.setMeasurement(MetricIdUtils.getCores().toString(), 1.0);
+    host.setMeasurement(MetricIdUtils.getCores().toString(), 2.0);
     host.addToMonthlyTotal(
-        OffsetDateTime.parse("2021-02-26T01:00:00Z"), Measurement.Uom.CORES, 3.0);
+        OffsetDateTime.parse("2021-02-26T01:00:00Z"), MetricIdUtils.getCores(), 3.0);
     host.addToMonthlyTotal(
-        OffsetDateTime.parse("2021-01-26T01:00:00Z"), Measurement.Uom.SOCKETS, 10.0);
+        OffsetDateTime.parse("2021-01-26T01:00:00Z"), MetricIdUtils.getSockets(), 10.0);
 
     host.addBucket(
         "RHEL",
@@ -307,10 +315,8 @@ class HostRepositoryTest {
     assertTrue(result.isPresent());
     Host toUpdate = result.get();
     assertEquals(2, toUpdate.getBuckets().size());
-
-    toUpdate.setAccountNumber("updated_acct_num");
-    toUpdate.setMeasurement(Uom.SOCKETS, 4.0);
-    toUpdate.setMeasurement(Uom.CORES, 8.0);
+    toUpdate.setMeasurement(MetricIdUtils.getSockets().toString(), 4.0);
+    toUpdate.setMeasurement(MetricIdUtils.getCores().toString(), 8.0);
     toUpdate.setDisplayName(DEFAULT_DISPLAY_NAME);
 
     HostTallyBucket rhelBucket =
@@ -324,23 +330,22 @@ class HostRepositoryTest {
             .findFirst()
             .orElse(null);
     toUpdate.removeBucket(rhelBucket);
-    toUpdate.setMeasurement(Measurement.Uom.CORES, 8.0);
+    toUpdate.setMeasurement(MetricIdUtils.getCores().toString(), 8.0);
     toUpdate.addToMonthlyTotal(
-        OffsetDateTime.parse("2021-02-26T01:00:00Z"), Measurement.Uom.CORES, 4.0);
+        OffsetDateTime.parse("2021-02-26T01:00:00Z"), MetricIdUtils.getCores(), 4.0);
     toUpdate.clearMonthlyTotal(OffsetDateTime.parse("2021-01-02T00:00:00Z"));
     persistHosts(toUpdate);
 
     Optional<Host> updateResult = repo.findById(toUpdate.getId());
     assertTrue(updateResult.isPresent());
     Host updated = updateResult.get();
-    assertEquals("updated_acct_num", updated.getAccountNumber());
-    assertEquals(4, updated.getMeasurement(Uom.SOCKETS).intValue());
-    assertEquals(8, updated.getMeasurement(Uom.CORES).intValue());
+    assertEquals(4, updated.getMeasurement(MetricIdUtils.getSockets().toString()).intValue());
+    assertEquals(8, updated.getMeasurement(MetricIdUtils.getCores().toString()).intValue());
     assertEquals(1, updated.getBuckets().size());
     assertTrue(updated.getBuckets().contains(satelliteBucket));
-    assertEquals(8.0, updated.getMeasurement(Measurement.Uom.CORES));
-    assertEquals(7.0, updated.getMonthlyTotal("2021-02", Measurement.Uom.CORES));
-    assertNull(updated.getMonthlyTotal("2021-02", Measurement.Uom.SOCKETS));
+    assertEquals(8.0, updated.getMeasurement(MetricIdUtils.getCores().toString()));
+    assertEquals(7.0, updated.getMonthlyTotal("2021-02", MetricIdUtils.getCores()));
+    assertNull(updated.getMonthlyTotal("2021-02", MetricIdUtils.getSockets()));
   }
 
   @Transactional
@@ -432,43 +437,12 @@ class HostRepositoryTest {
   void testNoHostFoundWhenItHasNoBucket() {
     Optional<Host> existing = repo.findById(existingHostsByInventoryId.get("inventory6").getId());
     assertTrue(existing.isPresent());
-    assertEquals("account3", existing.get().getAccountNumber());
 
     // When a host has no buckets, it will not be returned.
     Page<TallyHostView> hosts =
         repo.getTallyHostViews(
             "ORG_account4", null, null, null, null, null, null, 0, 0, PageRequest.of(0, 10));
     assertEquals(0, hosts.stream().count());
-  }
-
-  @Transactional
-  @Test
-  void testReturnsGuestsOfHypervisor() {
-    String account = "hostGuestTest";
-    String uuid = UUID.randomUUID().toString();
-
-    Host hypervisor = createHost("hypervisor", account);
-    hypervisor.setSubscriptionManagerId(uuid);
-    addBucketToHost(hypervisor, "RHEL", ServiceLevel.PREMIUM, Usage.PRODUCTION);
-
-    Host guest = createHost("guest", account);
-    guest.setGuest(true);
-    guest.setHypervisorUuid(uuid);
-    addBucketToHost(guest, "RHEL", ServiceLevel.PREMIUM, Usage.PRODUCTION);
-
-    Host unmappedGuest = createHost("unmappedGuest", account);
-    unmappedGuest.setGuest(true);
-    addBucketToHost(unmappedGuest, "RHEL", ServiceLevel.PREMIUM, Usage.PRODUCTION);
-
-    List<Host> toSave = Arrays.asList(hypervisor, guest, unmappedGuest);
-    toSave.forEach(x -> x.setDisplayName(DEFAULT_DISPLAY_NAME));
-    persistHosts(toSave.toArray(new Host[] {}));
-
-    Page<Host> guests = repo.getHostsByHypervisor("ORG_" + account, uuid, PageRequest.of(0, 10));
-    assertEquals(1, guests.getTotalElements());
-    assertEquals(uuid, guests.getContent().get(0).getHypervisorUuid());
-    assertEquals("guest", guests.getContent().get(0).getInventoryId());
-    assertEquals("INSIGHTS_guest", guests.getContent().get(0).getInsightsId());
   }
 
   @Transactional
@@ -528,81 +502,6 @@ class HostRepositoryTest {
 
   @Transactional
   @Test
-  void testCanSortByDisplayName() {
-    Page<TallyHostView> hosts =
-        repo.getTallyHostViews(
-            "ORG_account2",
-            "RHEL",
-            ServiceLevel.PREMIUM,
-            Usage.PRODUCTION,
-            BillingProvider._ANY,
-            "_ANY",
-            SANITIZED_MISSING_DISPLAY_NAME,
-            0,
-            0,
-            PageRequest.of(
-                0,
-                10,
-                Sort.Direction.ASC,
-                HostsResource.HOST_SORT_PARAM_MAPPING.get(HostReportSort.DISPLAY_NAME)));
-    List<TallyHostView> found = hosts.stream().collect(Collectors.toList());
-
-    assertEquals(1, found.size());
-    assertTallyHostView(found.get(0), "inventory3");
-  }
-
-  @Transactional
-  @Test
-  void testCanSortByMeasurementType() {
-    Page<TallyHostView> hosts =
-        repo.getTallyHostViews(
-            "ORG_account3",
-            RHEL,
-            ServiceLevel.PREMIUM,
-            Usage.PRODUCTION,
-            BillingProvider._ANY,
-            "_ANY",
-            SANITIZED_MISSING_DISPLAY_NAME,
-            0,
-            0,
-            PageRequest.of(
-                0,
-                10,
-                Sort.Direction.ASC,
-                HostsResource.HOST_SORT_PARAM_MAPPING.get(HostReportSort.DISPLAY_NAME)));
-    List<TallyHostView> found = hosts.stream().collect(Collectors.toList());
-
-    assertEquals(1, found.size());
-    assertTallyHostView(found.get(0), "inventory7");
-  }
-
-  @Transactional
-  @Test
-  void testCanSortByCores() {
-    Page<TallyHostView> hosts =
-        repo.getTallyHostViews(
-            "ORG_account2",
-            "RHEL",
-            ServiceLevel.PREMIUM,
-            Usage.PRODUCTION,
-            BillingProvider._ANY,
-            "_ANY",
-            SANITIZED_MISSING_DISPLAY_NAME,
-            0,
-            0,
-            PageRequest.of(
-                0,
-                10,
-                Sort.Direction.ASC,
-                HostsResource.HOST_SORT_PARAM_MAPPING.get(HostReportSort.CORES)));
-    List<TallyHostView> found = hosts.stream().collect(Collectors.toList());
-
-    assertEquals(1, found.size());
-    assertTallyHostView(found.get(0), "inventory3");
-  }
-
-  @Transactional
-  @Test
   void testCanSortBySockets() {
     Page<TallyHostView> hosts =
         repo.getTallyHostViews(
@@ -615,62 +514,8 @@ class HostRepositoryTest {
             SANITIZED_MISSING_DISPLAY_NAME,
             0,
             0,
-            PageRequest.of(
-                0,
-                10,
-                Sort.Direction.ASC,
-                HostsResource.HOST_SORT_PARAM_MAPPING.get(HostReportSort.SOCKETS)));
-    List<TallyHostView> found = hosts.stream().collect(Collectors.toList());
-
-    assertEquals(1, found.size());
-    assertTallyHostView(found.get(0), "inventory3");
-  }
-
-  @Transactional
-  @Test
-  void testCanSortByLastSeen() {
-    Page<TallyHostView> hosts =
-        repo.getTallyHostViews(
-            "ORG_account2",
-            "RHEL",
-            ServiceLevel.PREMIUM,
-            Usage.PRODUCTION,
-            BillingProvider._ANY,
-            "_ANY",
-            SANITIZED_MISSING_DISPLAY_NAME,
-            0,
-            0,
-            PageRequest.of(
-                0,
-                10,
-                Sort.Direction.ASC,
-                HostsResource.HOST_SORT_PARAM_MAPPING.get(HostReportSort.LAST_SEEN)));
-    List<TallyHostView> found = hosts.stream().collect(Collectors.toList());
-
-    assertEquals(1, found.size());
-    assertTallyHostView(found.get(0), "inventory3");
-  }
-
-  @Transactional
-  @Test
-  void testCanSortByHardwareType() {
-    Page<TallyHostView> hosts =
-        repo.getTallyHostViews(
-            "ORG_account2",
-            "RHEL",
-            ServiceLevel.PREMIUM,
-            Usage.PRODUCTION,
-            BillingProvider._ANY,
-            "_ANY",
-            SANITIZED_MISSING_DISPLAY_NAME,
-            0,
-            0,
-            PageRequest.of(
-                0,
-                10,
-                Sort.Direction.ASC,
-                HostsResource.HOST_SORT_PARAM_MAPPING.get(HostReportSort.HARDWARE_TYPE)));
-    List<TallyHostView> found = hosts.stream().collect(Collectors.toList());
+            PageRequest.of(0, 10, Sort.Direction.ASC, "sockets"));
+    List<TallyHostView> found = hosts.stream().toList();
 
     assertEquals(1, found.size());
     assertTallyHostView(found.get(0), "inventory3");
@@ -679,9 +524,9 @@ class HostRepositoryTest {
   @Transactional
   @Test
   void testGetHostViews() {
-    Host host1 = new Host("INV1", "HOST1", "my_acct", "my_org", "sub_id");
-    host1.setMeasurement(Uom.SOCKETS, 1.0);
-    host1.setMeasurement(Uom.CORES, 1.0);
+    Host host1 = new Host("INV1", "HOST1", "my_org", "sub_id");
+    host1.setMeasurement(MetricIdUtils.getSockets().toString(), 1.0);
+    host1.setMeasurement(MetricIdUtils.getCores().toString(), 1.0);
     host1.setNumOfGuests(4);
 
     host1.addBucket(
@@ -718,8 +563,8 @@ class HostRepositoryTest {
     List<Host> toPersist =
         Arrays.asList(
             host1,
-            new Host("INV2", "HOST2", "my_acct", "my_org", "sub2_id"),
-            new Host("INV3", "HOST3", "my_acct2", "another_org", "sub3_id"));
+            new Host("INV2", "HOST2", "my_org", "sub2_id"),
+            new Host("INV3", "HOST3", "another_org", "sub3_id"));
 
     toPersist.forEach(x -> x.setDisplayName(DEFAULT_DISPLAY_NAME));
     persistHosts(toPersist.toArray(new Host[] {}));
@@ -759,42 +604,13 @@ class HostRepositoryTest {
     assertEquals(5, hypervisor.getCores());
   }
 
-  static InstanceReportSort[] instanceSortParams() {
-    return InstancesResource.INSTANCE_SORT_PARAM_MAPPING
-        .keySet()
-        .toArray(new InstanceReportSort[0]);
-  }
-
-  static String[] tallyViewSortParams() {
-    return HostsResource.HOST_SORT_PARAM_MAPPING.values().toArray(new String[0]);
-  }
-
-  @Transactional
-  @ParameterizedTest
-  @MethodSource("org.candlepin.subscriptions.db.HostRepositoryTest#tallyViewSortParams")
-  void canSortByHostBasedSortMethods(String sort) {
-    Pageable page = PageRequest.of(0, 1, Sort.by(sort));
-    assertNotNull(
-        repo.getTallyHostViews(
-            "ORG_account1234",
-            "product",
-            ServiceLevel._ANY,
-            Usage._ANY,
-            null,
-            null,
-            "",
-            1,
-            0,
-            page));
-  }
-
   @Transactional
   @Test
   void testNullNumGuests() {
-    Host host = new Host("INV1", "HOST1", "my_acct", "my_org", "sub_id");
+    Host host = new Host("INV1", "HOST1", "my_org", "sub_id");
     host.setDisplayName(DEFAULT_DISPLAY_NAME);
-    host.setMeasurement(Uom.SOCKETS, 1.0);
-    host.setMeasurement(Uom.CORES, 1.0);
+    host.setMeasurement(MetricIdUtils.getSockets().toString(), 1.0);
+    host.setMeasurement(MetricIdUtils.getCores().toString(), 1.0);
 
     host.addBucket(
         "RHEL",
@@ -840,10 +656,10 @@ class HostRepositoryTest {
   @Transactional
   @Test
   void testShouldFilterSockets() {
-    Host coreHost = new Host("INV1", "HOST1", "my_acct", "my_org", "sub_id");
+    Host coreHost = new Host("INV1", "HOST1", "my_org", "sub_id");
     coreHost.setDisplayName(DEFAULT_DISPLAY_NAME);
-    coreHost.setMeasurement(Uom.SOCKETS, 0.0);
-    coreHost.setMeasurement(Uom.CORES, 1.0);
+    coreHost.setMeasurement(MetricIdUtils.getSockets().toString(), 0.0);
+    coreHost.setMeasurement(MetricIdUtils.getCores().toString(), 1.0);
     coreHost.addBucket(
         "RHEL",
         ServiceLevel.PREMIUM,
@@ -855,10 +671,10 @@ class HostRepositoryTest {
         1,
         HardwareMeasurementType.PHYSICAL);
 
-    Host socketHost = new Host("INV2", "HOST2", "my_acct", "my_org", "sub_id");
+    Host socketHost = new Host("INV2", "HOST2", "my_org", "sub_id");
     socketHost.setDisplayName(DEFAULT_DISPLAY_NAME);
-    socketHost.setMeasurement(Uom.SOCKETS, 1.0);
-    socketHost.setMeasurement(Uom.CORES, 0.0);
+    socketHost.setMeasurement(MetricIdUtils.getSockets().toString(), 1.0);
+    socketHost.setMeasurement(MetricIdUtils.getCores().toString(), 0.0);
     socketHost.addBucket(
         "RHEL",
         ServiceLevel.PREMIUM,
@@ -902,10 +718,10 @@ class HostRepositoryTest {
   @Transactional
   @Test
   void testShouldFilterCores() {
-    Host coreHost = new Host("INV1", "HOST1", "my_acct", "my_org", "sub_id");
+    Host coreHost = new Host("INV1", "HOST1", "my_org", "sub_id");
     coreHost.setDisplayName(DEFAULT_DISPLAY_NAME);
-    coreHost.setMeasurement(Uom.SOCKETS, 0.0);
-    coreHost.setMeasurement(Uom.CORES, 1.0);
+    coreHost.setMeasurement(MetricIdUtils.getSockets().toString(), 0.0);
+    coreHost.setMeasurement(MetricIdUtils.getCores().toString(), 1.0);
     coreHost.addBucket(
         "RHEL",
         ServiceLevel.PREMIUM,
@@ -917,10 +733,10 @@ class HostRepositoryTest {
         1,
         HardwareMeasurementType.PHYSICAL);
 
-    Host socketHost = new Host("INV2", "HOST2", "my_acct", "my_org", "sub_id");
+    Host socketHost = new Host("INV2", "HOST2", "my_org", "sub_id");
     socketHost.setDisplayName(DEFAULT_DISPLAY_NAME);
-    socketHost.setMeasurement(Uom.SOCKETS, 1.0);
-    socketHost.setMeasurement(Uom.CORES, 0.0);
+    socketHost.setMeasurement(MetricIdUtils.getSockets().toString(), 1.0);
+    socketHost.setMeasurement(MetricIdUtils.getCores().toString(), 0.0);
     socketHost.addBucket(
         "RHEL",
         ServiceLevel.PREMIUM,
@@ -1017,9 +833,7 @@ class HostRepositoryTest {
 
     persistHosts(host1, host2, host3);
 
-    HostReportSort sort = HostReportSort.CORES;
-    String sortValue = HostsResource.INSTANCE_SORT_PARAM_MAPPING.get(sort);
-    Pageable page = PageRequest.of(0, 10, Sort.by(sortValue));
+    Pageable page = PageRequest.of(0, 10, Sort.by(SORT_BY_MONTHLY_TOTALS));
 
     Page<HostApiProjection> results =
         repo.findAllBy(
@@ -1144,9 +958,7 @@ class HostRepositoryTest {
 
     persistHosts(host1, host2, host3);
 
-    HostReportSort sort = HostReportSort.CORES;
-    String sortValue = HostsResource.INSTANCE_SORT_PARAM_MAPPING.get(sort);
-    Pageable page = PageRequest.of(0, 10, Sort.by(sortValue));
+    Pageable page = PageRequest.of(0, 10, Sort.by(SORT_BY_MONTHLY_TOTALS));
 
     Page<HostApiProjection> results =
         repo.findAllBy(
@@ -1236,9 +1048,7 @@ class HostRepositoryTest {
 
     persistHosts(host1, host2, host3, host5);
 
-    HostReportSort sort = HostReportSort.CORES;
-    String sortValue = HostsResource.INSTANCE_SORT_PARAM_MAPPING.get(sort);
-    Pageable page = PageRequest.of(0, 10, Sort.by(sortValue));
+    Pageable page = PageRequest.of(0, 10, Sort.by(SORT_BY_MONTHLY_TOTALS));
 
     Page<HostApiProjection> results =
         repo.findAllBy(
@@ -1262,16 +1072,11 @@ class HostRepositoryTest {
     assertTrue(hostToBill.keySet().containsAll(Arrays.asList("i1", "i2", "i3")));
   }
 
-  private Host createHost(String inventoryId, String account) {
+  private Host createHost(String inventoryId, String org) {
     Host host =
-        new Host(
-            inventoryId,
-            "INSIGHTS_" + inventoryId,
-            account,
-            "ORG_" + account,
-            "SUBMAN_" + inventoryId);
-    host.setMeasurement(Uom.SOCKETS, 1.0);
-    host.setMeasurement(Uom.CORES, 1.0);
+        new Host(inventoryId, "INSIGHTS_" + inventoryId, "ORG_" + org, "SUBMAN_" + inventoryId);
+    host.setMeasurement(MetricIdUtils.getSockets().toString(), 1.0);
+    host.setMeasurement(MetricIdUtils.getCores().toString(), 1.0);
     return host;
   }
 

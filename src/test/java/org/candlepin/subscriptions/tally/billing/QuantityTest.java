@@ -21,24 +21,75 @@
 package org.candlepin.subscriptions.tally.billing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.util.Optional;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinitionRegistry;
+import com.redhat.swatch.configuration.registry.Variant;
+import java.lang.reflect.Field;
+import java.util.List;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntity;
 import org.candlepin.subscriptions.json.BillableUsage;
-import org.candlepin.subscriptions.json.BillableUsage.Uom;
-import org.candlepin.subscriptions.registry.TagMetric;
-import org.candlepin.subscriptions.registry.TagProfile;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class QuantityTest {
-  TagProfile tagProfile() {
-    var tagProfile = mock(TagProfile.class);
-    when(tagProfile.getTagMetric(any(), any()))
-        .thenReturn(Optional.of(TagMetric.builder().billingFactor(0.25).build()));
-    return tagProfile;
+  private static SubscriptionDefinitionRegistry originalReference;
+
+  private SubscriptionDefinitionRegistry subscriptionDefinitionRegistry;
+
+  private static final String SOCKETS = "Sockets";
+
+  @BeforeAll
+  static void setupClass() throws Exception {
+    Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+    instance.setAccessible(true);
+    originalReference =
+        (SubscriptionDefinitionRegistry) instance.get(SubscriptionDefinitionRegistry.class);
+  }
+
+  @AfterAll
+  static void tearDown() throws Exception {
+    Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+    instance.setAccessible(true);
+    instance.set(instance, originalReference);
+  }
+
+  @BeforeEach
+  void setupTest() {
+    subscriptionDefinitionRegistry = mock(SubscriptionDefinitionRegistry.class);
+    setMock(subscriptionDefinitionRegistry);
+  }
+
+  private void setMock(SubscriptionDefinitionRegistry mock) {
+    try {
+      Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+      instance.setAccessible(true);
+      instance.set(instance, mock);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void createSubscriptionDefinition(String tag, String uom) {
+    var variant = Variant.builder().tag(tag).build();
+    var awsMetric =
+        com.redhat.swatch.configuration.registry.Metric.builder()
+            .awsDimension("AWS_METRIC_ID")
+            .billingFactor(0.25)
+            .id(uom)
+            .build();
+    var subscriptionDefinition =
+        SubscriptionDefinition.builder()
+            .variants(List.of(variant))
+            .metrics(List.of(awsMetric))
+            .build();
+    variant.setSubscription(subscriptionDefinition);
+    when(subscriptionDefinitionRegistry.getSubscriptions())
+        .thenReturn(List.of(subscriptionDefinition));
   }
 
   @Test
@@ -58,9 +109,10 @@ class QuantityTest {
   @Test
   void testQuantityFromBillableUsage() {
     var billableUsage = new BillableUsage();
-    billableUsage.setUom(Uom.SOCKETS);
+    billableUsage.setUom(SOCKETS);
     billableUsage.setProductId("foo");
-    var billingUnit = new BillingUnit(tagProfile(), billableUsage);
+    createSubscriptionDefinition(billableUsage.getProductId(), billableUsage.getUom().toString());
+    var billingUnit = new BillingUnit(billableUsage);
     assertEquals(0.25, billingUnit.getBillingFactor());
     var billableQuantity = Quantity.of(4.0).to(billingUnit);
     assertEquals(billingUnit, billableQuantity.getUnit());
@@ -71,9 +123,10 @@ class QuantityTest {
   void testAddingBillableUnitToMetricUnit() {
     var quantity = Quantity.of(1.5);
     var billableUsage = new BillableUsage();
-    billableUsage.setUom(Uom.SOCKETS);
+    billableUsage.setUom(SOCKETS);
     billableUsage.setProductId("productId");
-    var billingUnit = new BillingUnit(tagProfile(), billableUsage);
+    createSubscriptionDefinition(billableUsage.getProductId(), billableUsage.getUom().toString());
+    var billingUnit = new BillingUnit(billableUsage);
     var billable = Quantity.of(4.0).to(billingUnit);
     assertEquals(1.0, billable.getValue());
     var result = quantity.add(billable);
@@ -85,9 +138,10 @@ class QuantityTest {
   void testSubtractingBillableUnitFromMetricUnit() {
     var quantity = Quantity.of(1.5);
     var billableUsage = new BillableUsage();
-    billableUsage.setUom(Uom.SOCKETS);
+    billableUsage.setUom(SOCKETS);
     billableUsage.setProductId("productId");
-    var billingUnit = new BillingUnit(tagProfile(), billableUsage);
+    createSubscriptionDefinition(billableUsage.getProductId(), billableUsage.getUom().toString());
+    var billingUnit = new BillingUnit(billableUsage);
     var billable = Quantity.of(1.0).to(billingUnit);
     assertEquals(0.25, billable.getValue());
     var result = quantity.subtract(billable);

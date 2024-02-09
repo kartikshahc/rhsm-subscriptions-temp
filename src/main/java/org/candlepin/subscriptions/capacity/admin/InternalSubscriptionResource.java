@@ -20,12 +20,14 @@
  */
 package org.candlepin.subscriptions.capacity.admin;
 
+import com.redhat.swatch.configuration.registry.Variant;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityNotFoundException;
 import jakarta.ws.rs.NotFoundException;
 import java.time.OffsetDateTime;
 import java.util.List;
 import lombok.extern.slf4j.Slf4j;
+import org.candlepin.subscriptions.ApplicationProperties;
 import org.candlepin.subscriptions.capacity.CapacityReconciliationController;
 import org.candlepin.subscriptions.db.model.BillingProvider;
 import org.candlepin.subscriptions.db.model.Subscription;
@@ -37,15 +39,15 @@ import org.candlepin.subscriptions.subscription.SubscriptionPruneController;
 import org.candlepin.subscriptions.subscription.SubscriptionSyncController;
 import org.candlepin.subscriptions.utilization.admin.api.InternalApi;
 import org.candlepin.subscriptions.utilization.admin.api.model.AwsUsageContext;
-import org.candlepin.subscriptions.utilization.admin.api.model.DefaultResponse;
+import org.candlepin.subscriptions.utilization.admin.api.model.AzureUsageContext;
+import org.candlepin.subscriptions.utilization.admin.api.model.Metric;
 import org.candlepin.subscriptions.utilization.admin.api.model.OfferingProductTags;
 import org.candlepin.subscriptions.utilization.admin.api.model.OfferingResponse;
 import org.candlepin.subscriptions.utilization.admin.api.model.RhmUsageContext;
+import org.candlepin.subscriptions.utilization.admin.api.model.RpcResponse;
 import org.candlepin.subscriptions.utilization.admin.api.model.SubscriptionResponse;
-import org.candlepin.subscriptions.utilization.admin.api.model.TagMetric;
 import org.candlepin.subscriptions.utilization.admin.api.model.TerminationRequest;
 import org.candlepin.subscriptions.utilization.admin.api.model.TerminationRequestData;
-import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -53,6 +55,9 @@ import org.springframework.stereotype.Component;
 @Slf4j
 @Component
 public class InternalSubscriptionResource implements InternalApi {
+
+  public static final String FEATURE_NOT_ENABLED_MESSAGE = "This feature is not currently enabled.";
+  private static final String SUCCESS_STATUS = "Success";
 
   private final SubscriptionSyncController subscriptionSyncController;
   private final SubscriptionPruneController subscriptionPruneController;
@@ -62,11 +67,10 @@ public class InternalSubscriptionResource implements InternalApi {
   private final MeterRegistry meterRegistry;
   private final UsageContextSubscriptionProvider awsSubscriptionProvider;
   private final UsageContextSubscriptionProvider rhmSubscriptionProvider;
-  private final TagMetricMapper tagMetricMapper;
-  private static final String SUCCESS_STATUS = "Success";
+  private final UsageContextSubscriptionProvider azureSubscriptionProvider;
+  private final MetricMapper metricMapper;
 
-  public static final String FEATURE_NOT_ENABLED_MESSSAGE =
-      "This feature is not currently enabled.";
+  private final ApplicationProperties applicationProperties;
 
   @Autowired
   public InternalSubscriptionResource(
@@ -76,7 +80,8 @@ public class InternalSubscriptionResource implements InternalApi {
       SubscriptionPruneController subscriptionPruneController,
       OfferingSyncController offeringSync,
       CapacityReconciliationController capacityReconciliationController,
-      TagMetricMapper tagMetricMapper) {
+      MetricMapper metricMapper,
+      ApplicationProperties applicationProperties) {
     this.meterRegistry = meterRegistry;
     this.subscriptionSyncController = subscriptionSyncController;
     this.properties = properties;
@@ -92,10 +97,17 @@ public class InternalSubscriptionResource implements InternalApi {
             this.meterRegistry.counter("rhsm-subscriptions.marketplace.missing.subscription"),
             this.meterRegistry.counter("rhsm-subscriptions.marketplace.ambiguous.subscription"),
             BillingProvider.RED_HAT);
+    this.azureSubscriptionProvider =
+        new UsageContextSubscriptionProvider(
+            this.subscriptionSyncController,
+            this.meterRegistry.counter("swatch_missing_azure_subscription"),
+            this.meterRegistry.counter("swatch_ambiguous_azure_subscription"),
+            BillingProvider.AZURE);
     this.subscriptionPruneController = subscriptionPruneController;
     this.offeringSync = offeringSync;
     this.capacityReconciliationController = capacityReconciliationController;
-    this.tagMetricMapper = tagMetricMapper;
+    this.metricMapper = metricMapper;
+    this.applicationProperties = applicationProperties;
   }
 
   /**
@@ -110,7 +122,7 @@ public class InternalSubscriptionResource implements InternalApi {
       Boolean reconcileCapacity, String subscriptionsJson) {
     var response = new SubscriptionResponse();
     if (!properties.isDevMode() && !properties.isManualSubscriptionEditingEnabled()) {
-      response.setDetail(FEATURE_NOT_ENABLED_MESSSAGE);
+      response.setDetail(FEATURE_NOT_ENABLED_MESSAGE);
       return response;
     }
     try {
@@ -127,42 +139,45 @@ public class InternalSubscriptionResource implements InternalApi {
 
   /** Enqueue all sync-enabled orgs to sync their subscriptions with upstream. */
   @Override
-  public DefaultResponse syncAllSubscriptions() {
+  public RpcResponse syncAllSubscriptions(Boolean forceSync) {
+    var response = new RpcResponse();
+    if (Boolean.FALSE.equals(forceSync) && !applicationProperties.isSubscriptionSyncEnabled()) {
+      log.info(
+          "Will not sync subscriptions for all opted-in orgs even though job was scheduled because subscriptionSyncEnabled=false.");
+      response.setResult(FEATURE_NOT_ENABLED_MESSAGE);
+      return response;
+    }
+
     Object principal = ResourceUtils.getPrincipal();
     log.info("Sync for all sync enabled orgs triggered by {}", principal);
     subscriptionSyncController.syncAllSubscriptionsForAllOrgs();
-    return getDefaultResponse(SUCCESS_STATUS);
+    return response;
   }
 
   @Override
-  public String forceSyncSubscriptionsForOrg(String orgId) {
+  public RpcResponse forceSyncSubscriptionsForOrg(String orgId) {
     subscriptionSyncController.forceSyncSubscriptionsForOrgAsync(orgId);
-    return "Sync started.";
+    return new RpcResponse();
   }
 
   /** Remove subscription and capacity records that are in the denylist */
   @Override
-  public DefaultResponse pruneUnlistedSubscriptions() {
+  public RpcResponse pruneUnlistedSubscriptions() {
     Object principal = ResourceUtils.getPrincipal();
     log.info("Prune of unlisted subscriptions triggered by {}", principal);
     subscriptionPruneController.pruneAllUnlistedSubscriptions();
-    return getDefaultResponse(SUCCESS_STATUS);
+    return new RpcResponse();
   }
 
   @Override
   public RhmUsageContext getRhmUsageContext(
-      String orgId,
-      OffsetDateTime date,
-      String productId,
-      String accountNumber,
-      String sla,
-      String usage) {
+      String orgId, OffsetDateTime date, String productId, String sla, String usage) {
 
     // Use "_ANY" because we don't support multiple rh marketplace accounts for a single customer
     String billingAccoutId = "_ANY";
 
     return rhmSubscriptionProvider
-        .getSubscription(orgId, accountNumber, productId, sla, usage, billingAccoutId, date)
+        .getSubscription(orgId, productId, sla, usage, billingAccoutId, date)
         .map(this::buildRhmUsageContext)
         .orElseThrow();
   }
@@ -175,23 +190,37 @@ public class InternalSubscriptionResource implements InternalApi {
 
   @Override
   public AwsUsageContext getAwsUsageContext(
+      @jakarta.validation.constraints.NotNull OffsetDateTime date,
+      @jakarta.validation.constraints.NotNull String productId,
       String orgId,
-      OffsetDateTime date,
-      String productId,
-      String accountNumber,
       String sla,
       String usage,
       String awsAccountId) {
 
     return awsSubscriptionProvider
-        .getSubscription(orgId, accountNumber, productId, sla, usage, awsAccountId, date)
+        .getSubscription(orgId, productId, sla, usage, awsAccountId, date)
         .map(this::buildAwsUsageContext)
         .orElseThrow();
   }
 
   @Override
-  public List<TagMetric> getTagMetrics(String tag) {
-    return tagMetricMapper.mapTagMetrics(subscriptionSyncController.getMetricsForTag(tag));
+  public AzureUsageContext getAzureMarketplaceContext(
+      @jakarta.validation.constraints.NotNull OffsetDateTime date,
+      @jakarta.validation.constraints.NotNull String productId,
+      String orgId,
+      String sla,
+      String usage,
+      String azureAccountId) {
+
+    return azureSubscriptionProvider
+        .getSubscription(orgId, productId, sla, usage, azureAccountId, date)
+        .map(this::buildAzureUsageContext)
+        .orElseThrow();
+  }
+
+  @Override
+  public List<Metric> getMetrics(String tag) {
+    return metricMapper.mapMetrics(Variant.getMetricsForTag(tag));
   }
 
   private AwsUsageContext buildAwsUsageContext(Subscription subscription) {
@@ -205,6 +234,14 @@ public class InternalSubscriptionResource implements InternalApi {
         .productCode(productCode)
         .customerId(customerId)
         .awsSellerAccountId(sellerAccount);
+  }
+
+  private AzureUsageContext buildAzureUsageContext(Subscription subscription) {
+    String[] parts = subscription.getBillingProviderId().split(";");
+    String resourceId = parts[0];
+    String planId = parts[1];
+    String offerId = parts[2];
+    return new AzureUsageContext().azureResourceId(resourceId).offerId(offerId).planId(planId);
   }
 
   /**
@@ -288,12 +325,5 @@ public class InternalSubscriptionResource implements InternalApi {
       throw new NotFoundException(
           "Subscription " + subscriptionId + " either does not exist or is already terminated");
     }
-  }
-
-  @NotNull
-  private DefaultResponse getDefaultResponse(String status) {
-    var response = new DefaultResponse();
-    response.setStatus(status);
-    return response;
   }
 }

@@ -20,6 +20,7 @@
  */
 package org.candlepin.subscriptions.tally.roller;
 
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
 import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.HashMap;
@@ -30,16 +31,15 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.TallySnapshotRepository;
 import org.candlepin.subscriptions.db.model.Granularity;
 import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
 import org.candlepin.subscriptions.db.model.TallyMeasurementKey;
 import org.candlepin.subscriptions.db.model.TallySnapshot;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.tally.AccountUsageCalculation;
 import org.candlepin.subscriptions.tally.UsageCalculation;
 import org.candlepin.subscriptions.tally.UsageCalculation.Totals;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,13 +54,10 @@ public abstract class BaseSnapshotRoller {
 
   protected TallySnapshotRepository tallyRepo;
   protected ApplicationClock clock;
-  protected final TagProfile tagProfile;
 
-  protected BaseSnapshotRoller(
-      TallySnapshotRepository tallyRepo, ApplicationClock clock, TagProfile tagProfile) {
+  protected BaseSnapshotRoller(TallySnapshotRepository tallyRepo, ApplicationClock clock) {
     this.tallyRepo = tallyRepo;
     this.clock = clock;
-    this.tagProfile = tagProfile;
   }
 
   /**
@@ -72,7 +69,7 @@ public abstract class BaseSnapshotRoller {
   public abstract Collection<TallySnapshot> rollSnapshots(AccountUsageCalculation accountCalc);
 
   protected TallySnapshot createSnapshotFromProductUsageCalculation(
-      String account, String orgId, UsageCalculation productCalc, Granularity granularity) {
+      String orgId, UsageCalculation productCalc, Granularity granularity) {
     TallySnapshot snapshot = new TallySnapshot();
     snapshot.setProductId(productCalc.getProductId());
     snapshot.setServiceLevel(productCalc.getSla());
@@ -81,7 +78,6 @@ public abstract class BaseSnapshotRoller {
     snapshot.setBillingAccountId(productCalc.getBillingAccountId());
     snapshot.setGranularity(granularity);
     snapshot.setOrgId(orgId);
-    snapshot.setAccountNumber(account);
     snapshot.setSnapshotDate(getSnapshotDate(granularity));
 
     // Copy the calculated hardware measurements to the snapshots
@@ -101,23 +97,14 @@ public abstract class BaseSnapshotRoller {
   }
 
   protected OffsetDateTime getSnapshotDate(Granularity granularity) {
-    switch (granularity) {
-      case HOURLY:
-        return clock.startOfCurrentHour();
-      case DAILY:
-        return clock.startOfToday();
-      case WEEKLY:
-        return clock.startOfCurrentWeek();
-      case MONTHLY:
-        return clock.startOfCurrentMonth();
-      case QUARTERLY:
-        return clock.startOfCurrentQuarter();
-      case YEARLY:
-        return clock.startOfCurrentYear();
-      default:
-        throw new IllegalArgumentException(
-            String.format("Unsupported granularity: %s", granularity));
-    }
+    return switch (granularity) {
+      case HOURLY -> clock.startOfCurrentHour();
+      case DAILY -> clock.startOfToday();
+      case WEEKLY -> clock.startOfCurrentWeek();
+      case MONTHLY -> clock.startOfCurrentMonth();
+      case QUARTERLY -> clock.startOfCurrentQuarter();
+      case YEARLY -> clock.startOfCurrentYear();
+    };
   }
 
   @SuppressWarnings("indentation")
@@ -150,7 +137,8 @@ public abstract class BaseSnapshotRoller {
 
     for (UsageCalculation.Key usageKey : accountCalc.getKeys()) {
       boolean isGranularitySupported =
-          tagProfile.tagSupportsGranularity(usageKey.getProductId(), targetGranularity);
+          SubscriptionDefinition.variantSupportsGranularity(
+              usageKey.getProductId(), targetGranularity.toString());
 
       if (isGranularitySupported) {
         TallySnapshot snap = orgSnapsByUsageKey.get(usageKey);
@@ -158,7 +146,7 @@ public abstract class BaseSnapshotRoller {
         if (snap == null && productCalc.hasMeasurements()) {
           snap =
               createSnapshotFromProductUsageCalculation(
-                  accountCalc.getAccount(), accountCalc.getOrgId(), productCalc, targetGranularity);
+                  accountCalc.getOrgId(), productCalc, targetGranularity);
           snaps.add(snap);
         } else if (snap != null && updateMaxValues(snap, productCalc)) {
           snaps.add(snap);
@@ -182,7 +170,7 @@ public abstract class BaseSnapshotRoller {
       AccountUsageCalculation calc, Granularity granularity) {
     Stream<String> prodStream = calc.getProducts().stream();
     return prodStream
-        .filter(p -> tagProfile.tagSupportsGranularity(p, granularity))
+        .filter(p -> SubscriptionDefinition.variantSupportsGranularity(p, granularity.toString()))
         .collect(Collectors.toSet());
   }
 
@@ -203,7 +191,17 @@ public abstract class BaseSnapshotRoller {
   }
 
   private Granularity getFinestGranularity(TallySnapshot snap) {
-    return tagProfile.granularityByTag(snap.getProductId());
+    // The snapshot calls this a "product ID" but in the SubscriptionDefinition world it's actually
+    // a variant's tag
+    String productId = snap.getProductId();
+    var subscription =
+        SubscriptionDefinition.lookupSubscriptionByTag(productId)
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        productId + " missing in subscription configuration"));
+
+    return Granularity.fromString(subscription.getFinestGranularity().toString());
   }
 
   private boolean updateTotals(
@@ -246,7 +244,7 @@ public abstract class BaseSnapshotRoller {
     }
   }
 
-  private boolean mustUpdate(Double existing, Double newMeasurment) {
-    return existing == null || newMeasurment > existing;
+  private boolean mustUpdate(Double existing, Double newMeasurement) {
+    return existing == null || newMeasurement > existing;
   }
 }

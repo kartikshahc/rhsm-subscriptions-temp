@@ -25,9 +25,11 @@ import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.core.Response.Status;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.candlepin.subscriptions.db.model.BillingProvider;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.Subscription;
@@ -59,40 +61,53 @@ public class UsageContextSubscriptionProvider {
 
   public Optional<Subscription> getSubscription(
       String orgId,
-      String accountNumber,
       String productId,
       String sla,
       String usage,
       String billingAccountId,
       OffsetDateTime subscriptionDate) {
+
+    // If billingAccountId is multipart, find all matching first part (ex: azureTenantId)
+    var searchByBillingAccountId = billingAccountId;
+    if (StringUtils.isNotBlank(billingAccountId) && billingAccountId.contains(";")) {
+      searchByBillingAccountId = billingAccountId.split(";")[0];
+    }
+
     UsageCalculation.Key usageKey =
         new Key(
             productId,
             ServiceLevel.fromString(sla),
             Usage.fromString(usage),
             billingProvider,
-            billingAccountId);
+            searchByBillingAccountId);
 
     // Set start date one hour in past to pickup recently terminated subscriptions
     var start = subscriptionDate.minusHours(1);
     List<Subscription> subscriptions =
-        subscriptionSyncController.findSubscriptionsAndSyncIfNeeded(
-            accountNumber, Optional.ofNullable(orgId), usageKey, start, subscriptionDate, true);
+        subscriptionSyncController.findSubscriptions(
+            Optional.ofNullable(orgId), usageKey, start, subscriptionDate);
+
+    var bestMatchSubscriptions =
+        filterByClosestMatchingMultipartBillingAccountId(subscriptions, billingAccountId);
 
     var existsRecentlyTerminatedSubscription =
-        subscriptions.stream()
-            .anyMatch(subscription -> subscription.getEndDate().isBefore(subscriptionDate));
+        bestMatchSubscriptions.stream()
+            .anyMatch(
+                subscription ->
+                    subscription.getEndDate() != null
+                        && subscription.getEndDate().isBefore(subscriptionDate));
 
     // Filter out any terminated subscriptions
     var activeSubscriptions =
-        subscriptions.stream()
+        bestMatchSubscriptions.stream()
             .filter(
                 subscription ->
-                    subscription.getEndDate().isAfter(subscriptionDate)
+                    subscription.getEndDate() == null
+                        || subscription.getEndDate().isAfter(subscriptionDate)
                         || subscription.getEndDate().equals(subscriptionDate))
-            .collect(Collectors.toList());
+            .toList();
 
-    if (subscriptions.isEmpty()) {
+    if (bestMatchSubscriptions.isEmpty()) {
       missingSubscriptionCounter.increment();
       throw new NotFoundException();
     }
@@ -106,16 +121,54 @@ public class UsageContextSubscriptionProvider {
     }
 
     if (activeSubscriptions.size() > 1) {
+      // If this is a multipart ID, throw an error since correct result could not be determined.
+      if (billingAccountId.contains(";")) {
+        throw new SubscriptionsException(
+            ErrorCode.SUBSCRIPTION_CANNOT_BE_DETERMINED,
+            Status.NOT_FOUND,
+            "Subscription could not be determined. Likely multiple subscriptions exist missing partial billingAccountId information.",
+            "");
+      }
       ambiguousSubscriptionCounter.increment();
       log.warn(
-          "Multiple subscriptions found for billing provider {} account {} or for org {} with key {} and product tag {}."
+          "Multiple subscriptions found for billing provider {} or for org {} with key {} and product tag {}."
               + " Selecting first result",
           billingProvider,
-          accountNumber,
           orgId,
           usageKey,
           usageKey.getProductId());
     }
     return activeSubscriptions.stream().findFirst();
+  }
+
+  // Filter out subscriptions if we have an exact match on a multipart billingAccountId.
+  private List<Subscription> filterByClosestMatchingMultipartBillingAccountId(
+      List<Subscription> subscriptions, String billingAccountId) {
+    if (Objects.nonNull(billingAccountId) && billingAccountId.contains(";")) {
+      var exactMatchingSubscriptions =
+          subscriptions.stream()
+              .filter(
+                  subscription ->
+                      Objects.equals(billingAccountId, subscription.getBillingAccountId()))
+              .collect(Collectors.toList());
+      if (!exactMatchingSubscriptions.isEmpty()) {
+        return exactMatchingSubscriptions;
+      }
+      // If exact billingAccountId doesn't match and there is only one subscription matching the
+      // partial id, return that subscription
+      else {
+        var billingAccountIdPartOne = billingAccountId.split(";")[0];
+        var closestMatch =
+            subscriptions.stream()
+                .filter(
+                    subscription ->
+                        subscription.getBillingAccountId().equals(billingAccountIdPartOne))
+                .collect(Collectors.toList());
+        if (closestMatch.size() == 1) {
+          return closestMatch;
+        }
+      }
+    }
+    return subscriptions;
   }
 }

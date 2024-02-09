@@ -31,6 +31,9 @@
 config/*
 !config/codestyle
 !config/kafka
+!config/otel
+!config/rabbitmq
+!config/splunk
 
 #VS Code
 .project
@@ -41,6 +44,7 @@ config/*
 !bin/insert-mock-hosts
 .vscode
 .editorconfig
+*.code-workspace
 
 .run/
 .env
@@ -56,3 +60,6 @@ bonfire
 .bonfire
 .docker
 .kube
+
+
+stub/__files/

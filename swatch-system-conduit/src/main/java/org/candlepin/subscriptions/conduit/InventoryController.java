@@ -35,7 +35,6 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -47,6 +46,7 @@ import java.util.stream.Stream;
 import org.candlepin.subscriptions.conduit.inventory.ConduitFacts;
 import org.candlepin.subscriptions.conduit.inventory.InventoryService;
 import org.candlepin.subscriptions.conduit.inventory.InventoryServiceProperties;
+import org.candlepin.subscriptions.conduit.inventory.ProviderFact;
 import org.candlepin.subscriptions.conduit.job.OrgSyncTaskManager;
 import org.candlepin.subscriptions.conduit.json.inventory.HbiNetworkInterface;
 import org.candlepin.subscriptions.conduit.rhsm.RhsmService;
@@ -55,7 +55,6 @@ import org.candlepin.subscriptions.conduit.rhsm.client.model.Consumer;
 import org.candlepin.subscriptions.conduit.rhsm.client.model.InstalledProducts;
 import org.candlepin.subscriptions.conduit.rhsm.client.model.Pagination;
 import org.candlepin.subscriptions.exception.ExternalServiceException;
-import org.candlepin.subscriptions.exception.MissingAccountNumberException;
 import org.candlepin.subscriptions.utilization.api.model.OrgInventory;
 import org.candlepin.subscriptions.validator.IpAddressValidator;
 import org.candlepin.subscriptions.validator.MacAddressValidator;
@@ -103,6 +102,8 @@ public class InventoryController {
   public static final String NET_INTERFACE_LO_IPV6_ADDRESS = "net.interface.lo.ipv6_address";
   public static final String CPU_SOCKETS = "cpu.cpu_socket(s)";
   public static final String CPU_CORES_PER_SOCKET = "cpu.core(s)_per_socket";
+  public static final String NUMBER_OF_CPUS = "cpu.cpu(s)";
+  public static final String THREADS_PER_CORE = "cpu.thread(s)_per_core";
   public static final String MEMORY_MEMTOTAL = "memory.memtotal";
   public static final String UNAME_MACHINE = "uname.machine";
   public static final String VIRT_IS_GUEST = "virt.is_guest";
@@ -115,7 +116,8 @@ public class InventoryController {
   public static final String OCM_BILLING_MODEL = "ocm.billing_model";
   public static final String UNKNOWN = "unknown";
   public static final String TRUE = "True";
-  public static final String NONE = "none";
+  public static final String INSTANCE_ID = "instance_id";
+
   public static final Set<String> IGNORED_CONSUMER_TYPES = Set.of("candlepin", "satellite", "sam");
   public static final long MAX_ALLOWED_SYSTEM_MEMORY_BYTES = 9007199254740991L;
 
@@ -176,6 +178,7 @@ public class InventoryController {
 
   protected ConduitFacts getFactsFromConsumer(Consumer consumer) {
     final Map<String, String> rhsmFacts = consumer.getFacts();
+    log.debug("Received message from consumer: {}", consumer);
     ConduitFacts facts = new ConduitFacts();
     facts.setOrgId(consumer.getOrgId());
     String clusterUuid = rhsmFacts.get(OPENSHIFT_CLUSTER_UUID);
@@ -201,6 +204,7 @@ public class InventoryController {
     extractNetworkFacts(rhsmFacts, facts);
     extractHardwareFacts(rhsmFacts, facts);
     extractVirtualizationFacts(consumer, rhsmFacts, facts);
+    extractProviderFacts(rhsmFacts, facts);
     facts.setCloudProvider(extractCloudProvider(rhsmFacts));
 
     List<String> productIds =
@@ -209,6 +213,17 @@ public class InventoryController {
 
     extractMarketPlaceFacts(rhsmFacts, facts);
     return facts;
+  }
+
+  private void extractProviderFacts(Map<String, String> rhsmFacts, ConduitFacts facts) {
+    for (ProviderFact provider : ProviderFact.values()) {
+      String instanceId = rhsmFacts.get(provider.getFactPropertyName(INSTANCE_ID));
+      if (instanceId != null && !instanceId.isEmpty()) {
+        facts.setProviderId(instanceId);
+        facts.setProviderType(provider.getType());
+        break;
+      }
+    }
   }
 
   private void extractMarketPlaceFacts(Map<String, String> rhsmFacts, ConduitFacts facts) {
@@ -234,7 +249,7 @@ public class InventoryController {
     if (assetTag.equals("7783-7084-3265-9085-8269-3286-77")) {
       return "azure";
     } else if (biosVendor.toLowerCase().contains("google")) {
-      return "google";
+      return "gcp";
     } else if (biosVersion.toLowerCase().contains("amazon")) {
       return "aws";
     } else if (systemManufacturer.toLowerCase().contains("alibaba")) {
@@ -295,6 +310,14 @@ public class InventoryController {
     }
     if (StringUtils.hasLength(coresPerSocket)) {
       facts.setCoresPerSocket(Integer.parseInt(coresPerSocket));
+    }
+    String numberOfCpus = rhsmFacts.get(NUMBER_OF_CPUS);
+    if (StringUtils.hasLength(numberOfCpus)) {
+      facts.setNumberOfCpus(Integer.parseInt(numberOfCpus));
+    }
+    String threadsPerCore = rhsmFacts.get(THREADS_PER_CORE);
+    if (StringUtils.hasLength(threadsPerCore)) {
+      facts.setThreadsPerCore(Integer.parseInt(threadsPerCore));
     }
 
     setMemoryFacts(rhsmFacts, facts);
@@ -552,8 +575,7 @@ public class InventoryController {
     }
   }
 
-  public void updateInventoryForOrg(String orgId)
-      throws MissingAccountNumberException, ExternalServiceException {
+  public void updateInventoryForOrg(String orgId) throws ExternalServiceException {
     updateInventoryForOrg(orgId, null);
   }
 
@@ -572,8 +594,7 @@ public class InventoryController {
   }
 
   @Timed("rhsm-conduit.sync.org-page")
-  public void updateInventoryForOrg(String orgId, String offset)
-      throws ExternalServiceException, MissingAccountNumberException {
+  public void updateInventoryForOrg(String orgId, String offset) throws ExternalServiceException {
 
     org.candlepin.subscriptions.conduit.rhsm.client.model.OrgInventory feedPage =
         getConsumerFeed(orgId, offset);
@@ -617,7 +638,7 @@ public class InventoryController {
   }
 
   public OrgInventory getInventoryForOrg(String orgId, String offset)
-      throws MissingAccountNumberException, ExternalServiceException {
+      throws ExternalServiceException {
     org.candlepin.subscriptions.conduit.rhsm.client.model.OrgInventory feedPage =
         getConsumerFeed(orgId, offset);
     return inventoryService.getInventoryForOrgConsumers(
@@ -625,23 +646,10 @@ public class InventoryController {
   }
 
   private Stream<ConduitFacts> validateConduitFactsForOrg(
-      org.candlepin.subscriptions.conduit.rhsm.client.model.OrgInventory feedPage)
-      throws MissingAccountNumberException {
+      org.candlepin.subscriptions.conduit.rhsm.client.model.OrgInventory feedPage) {
 
     if (feedPage.getBody().isEmpty()) {
       return Stream.empty();
-    }
-
-    // If the missing account number is false then
-    // Peek at the first consumer.  If it is missing an account number, that means they all are.
-    // Abort and return an empty stream.  No sense in wasting time looping through everything.
-    try {
-      if (!serviceProperties.isTolerateMissingAccountNumber()
-          && !StringUtils.hasText(feedPage.getBody().get(0).getAccountNumber())) {
-        throw new MissingAccountNumberException();
-      }
-    } catch (NoSuchElementException e) {
-      throw new MissingAccountNumberException();
     }
 
     return feedPage.getBody().stream()
@@ -657,11 +665,13 @@ public class InventoryController {
         return Optional.empty();
       }
       ConduitFacts facts = transformHostTimer.recordCallable(() -> getFactsFromConsumer(consumer));
-      facts.setAccountNumber(consumer.getAccountNumber());
+      if (facts == null) {
+        return Optional.empty();
+      }
 
       Set<ConstraintViolation<ConduitFacts>> violations =
           validateHostTimer.recordCallable(() -> validator.validate(facts));
-      if (violations.isEmpty()) {
+      if (violations == null || violations.isEmpty()) {
         return Optional.of(facts);
       } else {
         if (log.isInfoEnabled()) {

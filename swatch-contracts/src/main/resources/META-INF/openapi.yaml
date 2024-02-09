@@ -19,13 +19,13 @@ paths:
         in: path
         required: true
         schema:
-          $ref: '#/components/schemas/ProductId'
+          $ref: "#/components/schemas/ProductId"
         description: "The ID for the product we wish to query"
       - name: metric_id
         in: path
         required: true
         schema:
-          $ref: '#/components/schemas/MetricId'
+          $ref: "#/components/schemas/MetricId"
         description: "The metric ID for the product we wish to query"
       - name: offset
         in: query
@@ -104,13 +104,13 @@ paths:
                     has_data: false
                     value: 0.0
                 links:
-                  first: '/api/rhsm-subscriptions/v1/capacity/RHEL/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=0&limit=5'
-                  last: '/api/rhsm-subscriptions/v1/capacity/RHEL/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
+                  first: '/api/rhsm-subscriptions/v1/capacity/RHEL%20for%20x86/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=0&limit=5'
+                  last: '/api/rhsm-subscriptions/v1/capacity/RHEL%20for%20x86/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
                   previous: null
-                  next: '/api/rhsm-subscriptions/v1/capacity/RHEL/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
+                  next: '/api/rhsm-subscriptions/v1/capacity/RHEL%20for%20x86/Sockets?granularity=DAILY&sla=Premium&beginning=2017-08-01T17%3A32%3A28Z&ending=2017-08-31T17%3A32%3A28Z&offset=5&limit=5'
                 meta:
                   count: 10
-                  product: RHEL
+                  product: RHEL Server
                   granularity: Daily
                   service_level: Premium
         default:
@@ -265,11 +265,40 @@ paths:
                     status: 'Success'
                     message: "Contracts Synced for given org_id"
           description: success
-
       security:
         - support: []
         - test: []
       operationId: syncContractsByOrg
+
+  /api/swatch-contracts/internal/rpc/reset/contracts/{org_id}:
+    description: "Clear all contracts for a given org ID. "
+    delete:
+      parameters:
+        - name: org_id
+          description: ""
+          schema:
+            type: string
+          in: path
+          required: true
+      summary: "Clear all contracts for given org_id."
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              examples:
+                status response:
+                  value:
+                    status: 'Success'
+                    message: "Contracts Cleared for given org_id"
+          description: success
+      security:
+        - support: [ ]
+        - test: [ ]
+        - service: [ ]
+      operationId: deleteContractsByOrg
+
   /internal/rpc/syncAllContracts:
     description: "Trigger a sync for all contracts"
     post:
@@ -422,6 +451,9 @@ components:
           description: ""
           type: string
           example: aws
+        billing_provider_id:
+          description: Encoded additional information needed for billing
+          type: string
         billing_account_id:
           description: AWS billing account ids are 12 digits
           type: string
@@ -497,11 +529,21 @@ components:
         cloudIdentifiers:
           type: object
           properties:
+            partner:
+              type: string
             awsCustomerId:
               type: string
             awsCustomerAccountId:
               type: string
             productCode:
+              type: string
+            azureResourceId:
+              type: string
+            azureTenantId:
+              type: string
+            azureOfferId:
+              type: string
+            planId:
               type: string
     Dimension:
       properties:
@@ -520,40 +562,6 @@ components:
           type: string
         message:
           type: string
-    ProductId:
-      type: string
-      enum:
-        - OpenShift Container Platform
-        - RHEL
-        - RHEL Compute Node
-        - RHEL Desktop
-        - RHEL for ARM
-        - RHEL for IBM Power
-        - RHEL for IBM z
-        - RHEL for x86
-        - RHEL Server
-        - RHEL Workstation
-        - Satellite
-        - Satellite Capsule
-        - Satellite Server
-        - OpenShift-metrics
-        - OpenShift-dedicated-metrics
-        - rhosak
-        - rhacs
-        - rhods
-        - BASILISK
-        - rosa
-    MetricId:
-      type: string
-      enum:
-        # Cores is the same as core-hours
-        - Cores
-        - Sockets
-        - Core-seconds
-        - Instance-hours
-        - Storage-gibibyte-months
-        - Storage-gibibytes
-        - Transfer-gibibytes
     # Schemas ending in "Type" are intentionally named to prevent naming conflicts with db model classes
     GranularityType:
       description: "Describes the significance of each date in the snapshot list. For example if the
@@ -592,9 +600,9 @@ components:
             count:
               type: integer
             product:
-              $ref: '#/components/schemas/ProductId'
+              type: string
             metric_id:
-              $ref: '#/components/schemas/MetricId'
+              type: string
             granularity:
               $ref: '#/components/schemas/GranularityType'
             service_level:
@@ -641,6 +649,12 @@ components:
       required:
         - first
         - last
+    ProductId:
+      type: string
+      format: ProductId
+    MetricId:
+      type: string
+      format: MetricId
   responses:
     ErrorResponse:
       description: "Error handling request"

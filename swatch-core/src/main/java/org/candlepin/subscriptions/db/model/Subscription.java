@@ -23,8 +23,9 @@ package org.candlepin.subscriptions.db.model;
 import jakarta.persistence.*;
 import java.io.Serializable;
 import java.time.OffsetDateTime;
-import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import lombok.*;
@@ -48,7 +49,9 @@ import lombok.*;
       @NamedAttributeNode("subscriptionProductIds")
     },
     subgraphs = {
-      @NamedSubgraph(name = "subgraph.offering", attributeNodes = @NamedAttributeNode("productIds"))
+      @NamedSubgraph(
+          name = "subgraph.offering",
+          attributeNodes = {@NamedAttributeNode("childSkus"), @NamedAttributeNode("productIds")})
     })
 public class Subscription implements Serializable {
 
@@ -59,7 +62,7 @@ public class Subscription implements Serializable {
   @Column(name = "subscription_number")
   private String subscriptionNumber;
 
-  @ManyToOne(fetch = FetchType.EAGER)
+  @ManyToOne
   @JoinColumn(name = "sku")
   private Offering offering;
 
@@ -82,21 +85,32 @@ public class Subscription implements Serializable {
   @Column(name = "billing_account_id")
   private String billingAccountId;
 
-  @Column(name = "account_number")
-  private String accountNumber;
-
   @Column(name = "billing_provider")
   private BillingProvider billingProvider;
 
-  @OneToMany(mappedBy = "subscription", cascade = CascadeType.ALL, orphanRemoval = true)
+  @ElementCollection
+  @CollectionTable(
+      name = "subscription_product_ids",
+      joinColumns = {
+        @JoinColumn(name = "subscription_id", referencedColumnName = "subscription_id"),
+        @JoinColumn(name = "start_date", referencedColumnName = "start_date")
+      })
+  @Column(name = "product_id")
   @Builder.Default
   @ToString.Exclude
-  private Set<SubscriptionProductId> subscriptionProductIds = new HashSet<>();
+  private Set<String> subscriptionProductIds = new HashSet<>();
 
-  @OneToMany(mappedBy = "subscription", cascade = CascadeType.ALL, orphanRemoval = true)
   @Builder.Default
-  @ToString.Exclude // Excluded to prevent fetching a lazy-loaded collection
-  private Set<SubscriptionMeasurement> subscriptionMeasurements = new HashSet<>();
+  @ElementCollection
+  @CollectionTable(
+      name = "subscription_measurements",
+      joinColumns = {
+        @JoinColumn(name = "subscription_id", referencedColumnName = "subscription_id"),
+        @JoinColumn(name = "start_date", referencedColumnName = "start_date")
+      })
+  @Column(name = "value")
+  @ToString.Exclude
+  private Map<SubscriptionMeasurementKey, Double> subscriptionMeasurements = new HashMap<>();
 
   @Override
   public boolean equals(Object o) {
@@ -115,8 +129,8 @@ public class Subscription implements Serializable {
         && Objects.equals(endDate, sub.getEndDate())
         && Objects.equals(billingProviderId, sub.getBillingProviderId())
         && Objects.equals(billingAccountId, sub.getBillingAccountId())
-        && Objects.equals(accountNumber, sub.getAccountNumber())
-        && Objects.equals(billingProvider, sub.getBillingProvider());
+        && Objects.equals(billingProvider, sub.getBillingProvider())
+        && Objects.equals(subscriptionProductIds, sub.getSubscriptionProductIds());
   }
 
   @Override
@@ -130,8 +144,8 @@ public class Subscription implements Serializable {
         endDate,
         billingProviderId,
         billingAccountId,
-        accountNumber,
-        billingProvider);
+        billingProvider,
+        subscriptionProductIds);
   }
 
   /** Composite ID class for Subscription entities. */
@@ -162,21 +176,4 @@ public class Subscription implements Serializable {
   }
 
   // TODO: https://issues.redhat.com/browse/ENT-4030 //NOSONAR
-
-  public void addSubscriptionProductId(SubscriptionProductId spi) {
-    spi.setSubscription(this);
-    subscriptionProductIds.add(spi);
-  }
-
-  public void addSubscriptionMeasurement(SubscriptionMeasurement sm) {
-    sm.setSubscription(this);
-    subscriptionMeasurements.add(sm);
-  }
-
-  public void addSubscriptionMeasurements(Collection<SubscriptionMeasurement> measurements) {
-    for (SubscriptionMeasurement measurement : measurements) {
-      measurement.setSubscription(this);
-      subscriptionMeasurements.add(measurement);
-    }
-  }
 }

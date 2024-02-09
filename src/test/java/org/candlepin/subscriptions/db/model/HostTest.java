@@ -23,11 +23,11 @@ package org.candlepin.subscriptions.db.model;
 import static org.candlepin.subscriptions.tally.InventoryAccountUsageCollector.populateHostFieldsFromHbi;
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.OffsetDateTime;
 import java.util.Set;
 import java.util.UUID;
 import org.candlepin.subscriptions.inventory.db.model.InventoryHostFacts;
-import org.candlepin.subscriptions.json.Measurement;
 import org.candlepin.subscriptions.tally.facts.NormalizedFacts;
 import org.junit.jupiter.api.Test;
 
@@ -43,7 +43,6 @@ class HostTest {
 
     assertNull(host.getInventoryId());
     assertNull(host.getInsightsId());
-    assertNull(host.getAccountNumber());
     assertNull(host.getOrgId());
     assertNull(host.getDisplayName());
     assertNull(host.getSubscriptionManagerId());
@@ -66,7 +65,6 @@ class HostTest {
 
     assertEquals(host.getInventoryId(), inventoryHostFacts.getInventoryId().toString());
     assertEquals(host.getInsightsId(), inventoryHostFacts.getInsightsId());
-    assertEquals(host.getAccountNumber(), inventoryHostFacts.getAccount());
     assertEquals(host.getOrgId(), inventoryHostFacts.getOrgId());
     assertEquals(host.getDisplayName(), inventoryHostFacts.getDisplayName());
     assertEquals(host.getSubscriptionManagerId(), inventoryHostFacts.getSubscriptionManagerId());
@@ -87,7 +85,6 @@ class HostTest {
     populateHostFieldsFromHbi(host, inventoryHostFacts, normalizedFacts);
     assertEquals(host.getInventoryId(), inventoryHostFacts.getInventoryId().toString());
     assertEquals(host.getInsightsId(), inventoryHostFacts.getInsightsId());
-    assertEquals(host.getAccountNumber(), inventoryHostFacts.getAccount());
     assertEquals(host.getOrgId(), inventoryHostFacts.getOrgId());
     assertEquals(host.getDisplayName(), inventoryHostFacts.getDisplayName());
     assertEquals(host.getSubscriptionManagerId(), inventoryHostFacts.getSubscriptionManagerId());
@@ -109,7 +106,6 @@ class HostTest {
     populateHostFieldsFromHbi(host, inventoryHostFacts, normalizedFacts);
     assertEquals(host.getInventoryId(), inventoryHostFacts.getInventoryId().toString());
     assertEquals(host.getInsightsId(), inventoryHostFacts.getInsightsId());
-    assertEquals(host.getAccountNumber(), inventoryHostFacts.getAccount());
     assertEquals(host.getOrgId(), inventoryHostFacts.getOrgId());
     assertEquals(host.getDisplayName(), inventoryHostFacts.getDisplayName());
     assertEquals(host.getSubscriptionManagerId(), inventoryHostFacts.getSubscriptionManagerId());
@@ -131,7 +127,6 @@ class HostTest {
     populateHostFieldsFromHbi(host, inventoryHostFacts, normalizedFacts);
     assertEquals(host.getInventoryId(), inventoryHostFacts.getInventoryId().toString());
     assertEquals(host.getInsightsId(), inventoryHostFacts.getInsightsId());
-    assertEquals(host.getAccountNumber(), inventoryHostFacts.getAccount());
     assertEquals(host.getOrgId(), inventoryHostFacts.getOrgId());
     assertEquals(host.getDisplayName(), inventoryHostFacts.getDisplayName());
     assertEquals(host.getSubscriptionManagerId(), inventoryHostFacts.getSubscriptionManagerId());
@@ -146,8 +141,8 @@ class HostTest {
   @Test
   void testRemoveRangeRemovesMultipleMonths() {
     Host host = new Host();
-    host.addToMonthlyTotal("2021-01", Measurement.Uom.CORES, 1.0);
-    host.addToMonthlyTotal("2021-02", Measurement.Uom.CORES, 2.0);
+    host.addToMonthlyTotal("2021-01", MetricIdUtils.getCores(), 1.0);
+    host.addToMonthlyTotal("2021-02", MetricIdUtils.getCores(), 2.0);
     host.clearMonthlyTotals(
         OffsetDateTime.parse("2021-01-01T00:00:00Z"), OffsetDateTime.parse("2021-02-01T00:00:00Z"));
     assertTrue(host.getMonthlyTotals().values().stream().allMatch(v -> v == 0));
@@ -160,10 +155,10 @@ class HostTest {
 
     Host host = new Host();
     host.setBuckets(Set.of(b1));
-    host.addToMonthlyTotal("2021-01", Measurement.Uom.CORES, 1.0);
-    host.addToMonthlyTotal("2021-01", Measurement.Uom.CORES, 1.0);
-    host.addToMonthlyTotal("2021-02", Measurement.Uom.CORES, 2.0);
-    host.addToMonthlyTotal("2021-02", Measurement.Uom.CORES, 3.0);
+    host.addToMonthlyTotal("2021-01", MetricIdUtils.getCores(), 1.0);
+    host.addToMonthlyTotal("2021-01", MetricIdUtils.getCores(), 1.0);
+    host.addToMonthlyTotal("2021-02", MetricIdUtils.getCores(), 2.0);
+    host.addToMonthlyTotal("2021-02", MetricIdUtils.getCores(), 3.0);
 
     assertEquals(2.0, host.asTallyHostViewApiHost("2021-01").getCoreHours());
     assertEquals(5.0, host.asTallyHostViewApiHost("2021-02").getCoreHours());
@@ -213,7 +208,6 @@ class HostTest {
 
     inventoryHostFacts.setInventoryId(UUID.randomUUID());
     inventoryHostFacts.setInsightsId("123");
-    inventoryHostFacts.setAccount("234");
     inventoryHostFacts.setOrgId("345");
     inventoryHostFacts.setDisplayName("test");
     inventoryHostFacts.setSubscriptionManagerId("456");

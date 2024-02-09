@@ -23,6 +23,7 @@ package org.candlepin.subscriptions.tally;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -35,7 +36,6 @@ import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.TallyMeasurementKey;
 import org.candlepin.subscriptions.db.model.TallySnapshot;
 import org.candlepin.subscriptions.db.model.Usage;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 import org.candlepin.subscriptions.json.TallySummary;
 import org.junit.jupiter.api.Test;
 
@@ -43,43 +43,39 @@ class TallySummaryMapperTest {
 
   @Test
   void testMapSnapshots() {
-    String account = "A1";
     String org = "O1";
-    TallySnapshot rhosak =
+    TallySnapshot rosa =
         buildSnapshot(
-            account,
             org,
-            "RHOSAK",
+            "ROSA",
             Granularity.HOURLY,
             ServiceLevel.PREMIUM,
             Usage.PRODUCTION,
             BillingProvider.AWS,
-            Uom.STORAGE_GIBIBYTE_MONTHS,
+            "Storage-gibibytes",
             2);
     TallySnapshot rhel =
         buildSnapshot(
-            account,
             org,
             "RHEL",
             Granularity.HOURLY,
             ServiceLevel.PREMIUM,
             Usage.PRODUCTION,
             BillingProvider.RED_HAT,
-            Uom.SOCKETS,
+            MetricIdUtils.getSockets().getValue(),
             24);
 
-    var snapshots = List.of(rhosak, rhel);
+    var snapshots = List.of(rosa, rhel);
 
     TallySummaryMapper mapper = new TallySummaryMapper();
-    TallySummary summary = mapper.mapSnapshots(account, org, snapshots);
-    assertEquals(account, summary.getAccountNumber());
+    TallySummary summary = mapper.mapSnapshots(org, snapshots);
     assertEquals(org, summary.getOrgId());
     List<org.candlepin.subscriptions.json.TallySnapshot> summarySnaps = summary.getTallySnapshots();
     assertEquals(snapshots.size(), summarySnaps.size());
 
-    var mappedRhosakOptional = findSnapshot(summary, "RHOSAK");
-    assertTrue(mappedRhosakOptional.isPresent());
-    assertMappedSnapshot(rhosak, mappedRhosakOptional.get());
+    var mappedRosaOptional = findSnapshot(summary, "ROSA");
+    assertTrue(mappedRosaOptional.isPresent());
+    assertMappedSnapshot(rosa, mappedRosaOptional.get());
 
     var mappedRhelOptional = findSnapshot(summary, "RHEL");
     assertTrue(mappedRhelOptional.isPresent());
@@ -105,8 +101,7 @@ class TallySummaryMapperTest {
         m -> {
           HardwareMeasurementType type =
               HardwareMeasurementType.valueOf(m.getHardwareMeasurementType());
-          Uom uom = Uom.fromValue(m.getUom().value());
-          TallyMeasurementKey key = new TallyMeasurementKey(type, uom);
+          TallyMeasurementKey key = new TallyMeasurementKey(type, m.getUom());
           assertTrue(expectedMeasurements.containsKey(key));
           Double expectedValue = expectedMeasurements.get(key);
           assertEquals(expectedValue, m.getValue());
@@ -114,21 +109,19 @@ class TallySummaryMapperTest {
   }
 
   TallySnapshot buildSnapshot(
-      String account,
       String orgId,
       String productId,
       Granularity granularity,
       ServiceLevel sla,
       Usage usage,
       BillingProvider billingProvider,
-      Uom uom,
+      String metricId,
       double val) {
     Map<TallyMeasurementKey, Double> measurements = new HashMap<>();
-    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.PHYSICAL, uom), val);
-    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.TOTAL, uom), val);
+    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.PHYSICAL, metricId), val);
+    measurements.put(new TallyMeasurementKey(HardwareMeasurementType.TOTAL, metricId), val);
 
     return TallySnapshot.builder()
-        .accountNumber(account)
         .orgId(orgId)
         .productId(productId)
         .snapshotDate(OffsetDateTime.now())

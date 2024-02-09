@@ -23,19 +23,25 @@ package org.candlepin.subscriptions.tally.billing;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinitionRegistry;
+import com.redhat.swatch.configuration.registry.Variant;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import com.redhat.swatch.contracts.api.model.Contract;
 import com.redhat.swatch.contracts.api.model.Metric;
 import com.redhat.swatch.contracts.api.resources.DefaultApi;
 import com.redhat.swatch.contracts.client.ApiException;
+import java.lang.reflect.Field;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +49,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Stream;
 import lombok.extern.slf4j.Slf4j;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.BillableUsageRemittanceRepository;
 import org.candlepin.subscriptions.db.TallySnapshotRepository;
 import org.candlepin.subscriptions.db.model.BillableUsageRemittanceEntity;
@@ -56,15 +63,10 @@ import org.candlepin.subscriptions.db.model.TallyMeasurementKey;
 import org.candlepin.subscriptions.json.BillableUsage;
 import org.candlepin.subscriptions.json.BillableUsage.BillingProvider;
 import org.candlepin.subscriptions.json.BillableUsage.Sla;
-import org.candlepin.subscriptions.json.BillableUsage.Uom;
 import org.candlepin.subscriptions.json.BillableUsage.Usage;
-import org.candlepin.subscriptions.json.Measurement;
-import org.candlepin.subscriptions.json.TallyMeasurement;
-import org.candlepin.subscriptions.registry.BillingWindow;
-import org.candlepin.subscriptions.registry.TagMetric;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.test.TestClockConfiguration;
-import org.candlepin.subscriptions.util.ApplicationClock;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -78,35 +80,58 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @Slf4j
 @ExtendWith(MockitoExtension.class)
 class BillableUsageControllerTest {
-
+  private static SubscriptionDefinitionRegistry originalReference;
   private static ApplicationClock CLOCK = new TestClockConfiguration().adjustableClock();
   private static final String AWS_METRIC_ID = "aws_metric";
+
+  private static String CORES = "CORES";
 
   @Mock BillingProducer producer;
   @Mock BillableUsageRemittanceRepository remittanceRepo;
   @Mock TallySnapshotRepository snapshotRepo;
-  @Mock TagProfile tagProfile;
   @Mock DefaultApi contractsApi;
   @Mock ContractsClientProperties contractsClientProperties;
 
-  BillableUsageController controller;
-  ContractsController contractsController;
+  private SubscriptionDefinitionRegistry subscriptionDefinitionRegistry;
+  private BillableUsageController controller;
+  private ContractsController contractsController;
+
+  @BeforeAll
+  static void setupClass() throws Exception {
+    Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+    instance.setAccessible(true);
+    originalReference =
+        (SubscriptionDefinitionRegistry) instance.get(SubscriptionDefinitionRegistry.class);
+  }
+
+  @AfterAll
+  static void tearDown() throws Exception {
+    Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+    instance.setAccessible(true);
+    instance.set(instance, originalReference);
+  }
 
   @BeforeEach
   void setup() {
-    contractsController =
-        new ContractsController(tagProfile, contractsApi, contractsClientProperties);
+    contractsController = new ContractsController(contractsApi, contractsClientProperties);
     controller =
         new BillableUsageController(
-            CLOCK, producer, remittanceRepo, snapshotRepo, tagProfile, contractsController);
+            CLOCK, producer, remittanceRepo, snapshotRepo, contractsController);
+    subscriptionDefinitionRegistry = mock(SubscriptionDefinitionRegistry.class);
+    setMock(subscriptionDefinitionRegistry);
+    var usage = billable(CLOCK.startOfCurrentMonth(), 0.0);
+    createSubscriptionDefinition(
+        usage.getProductId(), "Storage-gibibytes", usage.getBillingFactor(), false);
   }
 
-  @Test
-  void usageIsSentAsIsWhenBillingWindowIsHourly() {
-    BillableUsage usage = new BillableUsage();
-    controller.submitBillableUsage(BillingWindow.HOURLY, usage);
-    verify(producer).produce(usage);
-    verifyNoInteractions(snapshotRepo, remittanceRepo);
+  private void setMock(SubscriptionDefinitionRegistry mock) {
+    try {
+      Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+      instance.setAccessible(true);
+      instance.set(instance, mock);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
   }
 
   @Test
@@ -118,7 +143,7 @@ class BillableUsageControllerTest {
     when(remittanceRepo.getRemittanceSummaries(any())).thenReturn(summaries);
 
     mockCurrentSnapshotMeasurementTotal(usage, 0.0003); // from single snapshot
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
 
     BillableUsageRemittanceEntity expectedRemittance = remittance(usage, CLOCK.now(), 1.0);
     BillableUsage expectedUsage = billable(usage.getSnapshotDate(), 1.0);
@@ -136,7 +161,7 @@ class BillableUsageControllerTest {
     when(remittanceRepo.getRemittanceSummaries(any())).thenReturn(summaries);
 
     mockCurrentSnapshotMeasurementTotal(usage, 4.4); // from multiple snapshots (2.1, 2.3)
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
 
     BillableUsageRemittanceEntity expectedRemittance = remittance(usage, CLOCK.now(), 2.0);
     BillableUsage expectedUsage = billable(usage.getSnapshotDate(), 2.0);
@@ -149,24 +174,16 @@ class BillableUsageControllerTest {
   void monthlyWindowRemittanceMultipleOfBillingFactor() {
     BillableUsage usage = billable(CLOCK.startOfCurrentMonth(), 68.103);
     usage.setProductId("osd");
-    usage.setUom(Uom.CORES);
+    usage.setUom(CORES);
     List<RemittanceSummaryProjection> summaries = new ArrayList<>();
     summaries.add(RemittanceSummaryProjection.builder().totalRemittedPendingValue(996.0).build());
 
     when(remittanceRepo.getRemittanceSummaries(any())).thenReturn(summaries);
 
-    TagMetric tag =
-        TagMetric.builder()
-            .tag("OpenShift-dedicated-metrics")
-            .uom(Measurement.Uom.CORES)
-            .billingFactor(0.25)
-            .accountQueryKey("osd")
-            .build();
-
-    when(tagProfile.getTagMetric("osd", Measurement.Uom.CORES)).thenReturn(Optional.of(tag));
+    createSubscriptionDefinition("osd", usage.getUom(), 0.25, false);
 
     mockCurrentSnapshotMeasurementTotal(usage, 1064.104);
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
 
     // applicable_usage(68.1) converted to billable_usage as 68.1/4 = 17.025. Rounds to 18. 18 *
     // 4(Billing_factor) = 72
@@ -174,7 +191,7 @@ class BillableUsageControllerTest {
     BillableUsage expectedUsage = billable(usage.getSnapshotDate(), 18.0);
     expectedUsage.setId(usage.getId()); // Id will be regenerated above.
     expectedUsage.setProductId("osd");
-    expectedUsage.setUom(Uom.CORES);
+    expectedUsage.setUom(MetricIdUtils.getCores().getValue());
     expectedUsage.setBillingFactor(0.25);
     verify(remittanceRepo).save(expectedRemittance);
     verify(producer).produce(expectedUsage);
@@ -187,7 +204,7 @@ class BillableUsageControllerTest {
     summaries.add(RemittanceSummaryProjection.builder().totalRemittedPendingValue(1.0).build());
     when(remittanceRepo.getRemittanceSummaries(any())).thenReturn(summaries);
     mockCurrentSnapshotMeasurementTotal(usage, 0.05); // from multiple snapshots (0.02, 0.03)
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
 
     BillableUsage expectedUsage = billable(usage.getSnapshotDate(), 0.0); // Nothing billed
     expectedUsage.setId(usage.getId()); // Id will be regenerated above.
@@ -198,22 +215,16 @@ class BillableUsageControllerTest {
   void billingFactorAppliedInRecalculationEvenNumber() {
     BillableUsage usage = billable(CLOCK.startOfCurrentMonth(), 8.0);
     usage.setProductId("osd");
-    usage.setUom(Uom.CORES);
+    usage.setUom(CORES);
     List<RemittanceSummaryProjection> summaries = new ArrayList<>();
     summaries.add(RemittanceSummaryProjection.builder().totalRemittedPendingValue(6.0).build());
 
     when(remittanceRepo.getRemittanceSummaries(any())).thenReturn(summaries);
-    TagMetric tag =
-        TagMetric.builder()
-            .tag("OpenShift-dedicated-metrics")
-            .uom(Measurement.Uom.CORES)
-            .billingFactor(0.25)
-            .accountQueryKey("osd")
-            .build();
 
-    when(tagProfile.getTagMetric("osd", Measurement.Uom.CORES)).thenReturn(Optional.of(tag));
+    createSubscriptionDefinition("osd", usage.getUom(), 0.25, false);
+
     mockCurrentSnapshotMeasurementTotal(usage, 16.0);
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
 
     BillableUsageRemittanceEntity expectedRemittance = remittance(usage, CLOCK.now(), 12.0);
     BillableUsage expectedUsage = billable(usage.getSnapshotDate(), usage.getValue());
@@ -229,24 +240,17 @@ class BillableUsageControllerTest {
   void billingFactorAppliedInRecalculation() {
     BillableUsage usage = billable(CLOCK.startOfCurrentMonth(), 8.0);
     usage.setProductId("osd");
-    usage.setUom(Uom.CORES);
+    usage.setUom(CORES);
 
     List<RemittanceSummaryProjection> summaries = new ArrayList<>();
     summaries.add(RemittanceSummaryProjection.builder().totalRemittedPendingValue(6.0).build());
 
     when(remittanceRepo.getRemittanceSummaries(any())).thenReturn(summaries);
 
-    TagMetric tag =
-        TagMetric.builder()
-            .tag("OpenShift-dedicated-metrics")
-            .uom(Measurement.Uom.CORES)
-            .billingFactor(0.25)
-            .accountQueryKey("osd")
-            .build();
+    createSubscriptionDefinition("osd", usage.getUom().toString(), 0.25, false);
 
-    when(tagProfile.getTagMetric("osd", Measurement.Uom.CORES)).thenReturn(Optional.of(tag));
     mockCurrentSnapshotMeasurementTotal(usage, 32.3);
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
 
     BillableUsageRemittanceEntity expectedRemittance = remittance(usage, CLOCK.now(), 28.00);
     BillableUsage expectedUsage = billable(usage.getSnapshotDate(), usage.getValue());
@@ -435,7 +439,8 @@ class BillableUsageControllerTest {
   static Stream<Arguments> remittanceParameters() {
     OffsetDateTime startOfUsage = CLOCK.startOfCurrentMonth().plusDays(4);
     return Stream.of(
-        // arguments(currentUsage, currentRemittance, expectedRemitted, expectedBilledValue)
+        // arguments(usageDate, currentUsage, currentRemittance, expectedRemitted,
+        // expectedBilledValue)
         // NOTE: currantUsage is the sum of all snapshots, NOT the value from BillableUsage.
         arguments(startOfUsage, 0.5, 0.0, 1.0, 1.0),
         arguments(startOfUsage.plusDays(5), 1.0, 1.0, 0.0, 0.0),
@@ -498,16 +503,15 @@ class BillableUsageControllerTest {
 
   private BillableUsage billable(OffsetDateTime date, Double value) {
     return new BillableUsage()
-        .withAccountNumber("account123")
         .withUsage(Usage.PRODUCTION)
         .withId(UUID.randomUUID())
         .withBillingAccountId("aws-account1")
         .withBillingFactor(1.0)
         .withBillingProvider(BillingProvider.AWS)
         .withOrgId("org123")
-        .withProductId("rhosak")
+        .withProductId("rosa")
         .withSla(Sla.STANDARD)
-        .withUom(Uom.STORAGE_GIBIBYTES)
+        .withUom("STORAGE_GIBIBYTES")
         .withSnapshotDate(date)
         .withValue(value);
   }
@@ -521,7 +525,7 @@ class BillableUsageControllerTest {
         .billingAccountId(billableUsage.getBillingAccountId())
         .productId(billableUsage.getProductId())
         .sla(billableUsage.getSla().value())
-        .metricId(billableUsage.getUom().value())
+        .metricId(MetricId.fromString(billableUsage.getUom()).getValue())
         .accumulationPeriod(InstanceMonthlyTotalKey.formatMonthId(billableUsage.getSnapshotDate()))
         .remittancePendingDate(remittedDate)
         .build();
@@ -529,8 +533,7 @@ class BillableUsageControllerTest {
 
   private void mockCurrentSnapshotMeasurementTotal(BillableUsage usage, Double sum) {
     TallyMeasurementKey measurementKey =
-        new TallyMeasurementKey(
-            HardwareMeasurementType.PHYSICAL, Measurement.Uom.fromValue(usage.getUom().value()));
+        new TallyMeasurementKey(HardwareMeasurementType.PHYSICAL, usage.getUom());
     when(snapshotRepo.sumMeasurementValueForPeriod(
             usage.getOrgId(),
             usage.getProductId(),
@@ -552,7 +555,8 @@ class BillableUsageControllerTest {
     return BillableUsageRemittanceEntity.builder()
         .key(remKey)
         .remittedPendingValue(value)
-        .accountNumber(usage.getAccountNumber())
+        .tallyId(usage.getId())
+        .hardwareMeasurementType(usage.getHardwareMeasurementType())
         .build();
   }
 
@@ -568,11 +572,6 @@ class BillableUsageControllerTest {
     BillableUsage usage = billable(usageDate, currentUsage);
 
     // Enable contracts for the current product.
-    TagMetric tagMetric = TagMetric.builder().billingFactor(billingFactor).build();
-    when(tagProfile.getTagMetric(
-            usage.getProductId(), Measurement.Uom.fromValue(usage.getUom().value())))
-        .thenReturn(Optional.of(tagMetric));
-    when(tagProfile.isTagContractEnabled(usage.getProductId())).thenReturn(isContractEnabledTest);
 
     BillableUsageRemittanceEntity existingRemittance =
         remittance(usage, CLOCK.now().minusHours(1), currentRemittance);
@@ -589,9 +588,8 @@ class BillableUsageControllerTest {
 
     // Configure contract data, if defined
     if (isContractEnabledTest) {
-      when(tagProfile.awsDimensionForTagAndUom(
-              usage.getProductId(), TallyMeasurement.Uom.fromValue(usage.getUom().value())))
-          .thenReturn(AWS_METRIC_ID);
+      createSubscriptionDefinition(
+          usage.getProductId(), usage.getUom().toString(), billingFactor, true);
 
       mockContractCoverage(
           usage.getOrgId(),
@@ -601,14 +599,17 @@ class BillableUsageControllerTest {
           usage.getBillingProvider().value(),
           usage.getBillingAccountId(),
           usage.getSnapshotDate());
+    } else {
+      createSubscriptionDefinition(
+          usage.getProductId(), usage.getUom().toString(), billingFactor, false);
     }
-
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
 
     // Remittance should only be saved when it changes.
     // NOTE: Using argument captors make errors caught by mocks a little easier to debug.
     BillableUsageRemittanceEntity expectedRemittance =
         remittance(usage, CLOCK.now(), expectedRemitted);
+
+    controller.submitBillableUsage(usage);
 
     ArgumentCaptor<BillableUsageRemittanceEntity> remitted =
         ArgumentCaptor.forClass(BillableUsageRemittanceEntity.class);
@@ -659,14 +660,11 @@ class BillableUsageControllerTest {
   void usageIsSentWhenContractIsMissingWithinWindow() throws Exception {
     BillableUsage usage = billable(OffsetDateTime.now(), 1.0);
     usage.setSnapshotDate(OffsetDateTime.now());
-    usage.setUom(Uom.CORES);
-    when(tagProfile.isTagContractEnabled(usage.getProductId())).thenReturn(true);
+    usage.setUom(CORES);
+    createSubscriptionDefinition(usage.getProductId(), usage.getUom().toString(), 1.0, true);
     when(contractsApi.getContract(any(), any(), any(), any(), any(), any())).thenReturn(List.of());
-    when(tagProfile.awsDimensionForTagAndUom(
-            usage.getProductId(), TallyMeasurement.Uom.fromValue(usage.getUom().value())))
-        .thenReturn(AWS_METRIC_ID);
 
-    controller.submitBillableUsage(BillingWindow.MONTHLY, usage);
+    controller.submitBillableUsage(usage);
     verify(producer).produce(null);
   }
 
@@ -675,7 +673,61 @@ class BillableUsageControllerTest {
     BillableUsage usage = billable(OffsetDateTime.now(), 1.0);
     usage.setSnapshotDate(OffsetDateTime.now());
     usage.setBillingProvider(BillingProvider.GCP);
-    when(tagProfile.isTagContractEnabled(usage.getProductId())).thenReturn(true);
-    assertNull(controller.processBillableUsage(BillingWindow.MONTHLY, usage));
+    createSubscriptionDefinition(usage.getProductId(), usage.getUom().toString(), 1.0, true);
+    controller.submitBillableUsage(usage);
+    verify(producer).produce(null);
+  }
+
+  private void createSubscriptionDefinition(
+      String tag, String uom, double billingFactor, boolean contractEnabled) {
+    uom = uom.replace('_', '-');
+    var variant = Variant.builder().tag(tag).build();
+    var awsMetric =
+        com.redhat.swatch.configuration.registry.Metric.builder()
+            .awsDimension(AWS_METRIC_ID)
+            .billingFactor(billingFactor)
+            .id(uom)
+            .build();
+    var subscriptionDefinition =
+        SubscriptionDefinition.builder()
+            .contractEnabled(contractEnabled)
+            .variants(List.of(variant))
+            .metrics(List.of(awsMetric))
+            .build();
+    variant.setSubscription(subscriptionDefinition);
+    when(subscriptionDefinitionRegistry.getSubscriptions())
+        .thenReturn(List.of(subscriptionDefinition));
+  }
+
+  @Test
+  void testUpdateBillableUsageRemittanceWithRetryAfter() {
+    var retryAfter = OffsetDateTime.now();
+    var expectedRemittance = new BillableUsageRemittanceEntity();
+    when(remittanceRepo.findById(any()))
+        .thenReturn(Optional.of(new BillableUsageRemittanceEntity()));
+    var billableUsage = new BillableUsage();
+    billableUsage.setUsage(Usage.PRODUCTION);
+    billableUsage.setBillingProvider(BillingProvider.AZURE);
+    billableUsage.setSla(Sla.STANDARD);
+    billableUsage.setSnapshotDate(OffsetDateTime.now());
+    billableUsage.setUom(CORES);
+    createSubscriptionDefinition("osd", CORES, 0.25, false);
+    controller.updateBillableUsageRemittanceWithRetryAfter(billableUsage, retryAfter);
+    expectedRemittance.setRetryAfter(retryAfter);
+    verify(remittanceRepo).save(expectedRemittance);
+  }
+
+  @Test
+  void testUpdateBillableUsageRemittanceWithRetryAfterMissingRemittance() {
+    var retryAfter = OffsetDateTime.now();
+    var billableUsage = new BillableUsage();
+    billableUsage.setUsage(Usage.PRODUCTION);
+    billableUsage.setBillingProvider(BillingProvider.AZURE);
+    billableUsage.setSla(Sla.STANDARD);
+    billableUsage.setSnapshotDate(OffsetDateTime.now());
+    billableUsage.setUom(CORES);
+    createSubscriptionDefinition("osd", CORES, 0.25, false);
+    controller.updateBillableUsageRemittanceWithRetryAfter(billableUsage, retryAfter);
+    verify(remittanceRepo, never()).save(any());
   }
 }

@@ -20,10 +20,12 @@
  */
 package org.candlepin.subscriptions.tally.billing;
 
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
 import lombok.extern.slf4j.Slf4j;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.BillableUsageRemittanceFilter;
 import org.candlepin.subscriptions.db.BillableUsageRemittanceRepository;
 import org.candlepin.subscriptions.db.TallySnapshotRepository;
@@ -38,10 +40,6 @@ import org.candlepin.subscriptions.db.model.TallyMeasurementKey;
 import org.candlepin.subscriptions.db.model.Usage;
 import org.candlepin.subscriptions.exception.ErrorCode;
 import org.candlepin.subscriptions.json.BillableUsage;
-import org.candlepin.subscriptions.json.Measurement.Uom;
-import org.candlepin.subscriptions.registry.BillingWindow;
-import org.candlepin.subscriptions.registry.TagProfile;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.springframework.stereotype.Component;
 
 @Slf4j
@@ -52,7 +50,6 @@ public class BillableUsageController {
   private final BillingProducer billingProducer;
   private final BillableUsageRemittanceRepository billableUsageRemittanceRepository;
   private final TallySnapshotRepository snapshotRepository;
-  private final TagProfile tagProfile;
   private final ContractsController contractsController;
 
   public BillableUsageController(
@@ -60,36 +57,18 @@ public class BillableUsageController {
       BillingProducer billingProducer,
       BillableUsageRemittanceRepository billableUsageRemittanceRepository,
       TallySnapshotRepository snapshotRepository,
-      TagProfile tagProfile,
       ContractsController contractsController) {
     this.clock = clock;
     this.billingProducer = billingProducer;
     this.billableUsageRemittanceRepository = billableUsageRemittanceRepository;
     this.snapshotRepository = snapshotRepository;
-    this.tagProfile = tagProfile;
     this.contractsController = contractsController;
   }
 
-  public void submitBillableUsage(BillingWindow billingWindow, BillableUsage usage) {
+  public void submitBillableUsage(BillableUsage usage) {
     // Send the message last to ensure that remittance has been updated.
     // If the message fails to send, it will roll back the transaction.
-    billingProducer.produce(processBillableUsage(billingWindow, usage));
-  }
-
-  public BillableUsage processBillableUsage(BillingWindow billingWindow, BillableUsage usage) {
-    BillableUsage toBill;
-    switch (billingWindow) {
-      case HOURLY:
-        toBill = produceHourlyBillable(usage);
-        break;
-      case MONTHLY:
-        toBill = produceMonthlyBillable(usage);
-        break;
-      default:
-        throw new UnsupportedOperationException(
-            "Unsupported billing window specified when producing billable usage: " + billingWindow);
-    }
-    return toBill;
+    billingProducer.produce(produceMonthlyBillable(usage));
   }
 
   public double getTotalRemitted(BillableUsage billableUsage) {
@@ -114,11 +93,12 @@ public class BillableUsageController {
 
   /**
    * Find the latest remitted value and billing factor used for that remittance in the database.
-   * Convert it to use the billing factor that's currently listed in the tag profile. This might be
-   * a no-op if the factor hasn't changed. BillableUsage should be the difference between the
-   * current usage and the previous usage at the newest tag profile billing factor. Integer-only
-   * billing is then applied before remitting. calculations that are need to bill any unbilled
-   * amount and to record any unbilled amount
+   * Convert it to use the billing factor that's currently listed in the
+   * swatch-product-configuration library. This might be a no-op if the factor hasn't changed.
+   * BillableUsage should be the difference between the current usage and the previous usage at the
+   * newest swatch-product-configuration library billing factor. Integer-only billing is then
+   * applied before remitting. calculations that are need to bill any unbilled amount and to record
+   * any unbilled amount
    *
    * @param applicableUsage The total amount of measured usage used during the calculation.
    * @param usage The specific event within a given month to determine what need to be billed
@@ -129,7 +109,7 @@ public class BillableUsageController {
   private BillableUsageCalculation calculateBillableUsage(
       double applicableUsage, BillableUsage usage, double remittanceTotal) {
     Quantity<MetricUnit> totalUsage = Quantity.of(applicableUsage);
-    var billingUnit = new BillingUnit(tagProfile, usage);
+    var billingUnit = new BillingUnit(usage);
     Quantity<MetricUnit> currentRemittance = Quantity.of(remittanceTotal);
     Quantity<BillingUnit> billableValue =
         totalUsage
@@ -155,11 +135,6 @@ public class BillableUsageController {
         .build();
   }
 
-  private BillableUsage produceHourlyBillable(BillableUsage usage) {
-    log.debug("Processing hourly billable usage {}", usage);
-    return usage;
-  }
-
   private BillableUsage produceMonthlyBillable(BillableUsage usage) {
     log.info(
         "Processing monthly billable usage for orgId={} productId={} uom={} provider={}, billingAccountId={} snapshotDate={}",
@@ -176,7 +151,7 @@ public class BillableUsageController {
             usage, clock.startOfMonth(usage.getSnapshotDate()), usage.getSnapshotDate());
 
     Optional<Double> contractValue = Optional.of(0.0);
-    if (tagProfile.isTagContractEnabled(usage.getProductId())) {
+    if (SubscriptionDefinition.isContractEnabled(usage.getProductId())) {
       try {
         contractValue = Optional.of(contractsController.getContractCoverage(usage));
         log.debug("Adjusting usage based on contracted amount of {}", contractValue);
@@ -205,7 +180,7 @@ public class BillableUsageController {
     }
 
     Quantity<BillingUnit> contractAmount =
-        Quantity.fromContractCoverage(tagProfile, usage, contractValue.get());
+        Quantity.fromContractCoverage(usage, contractValue.get());
     double applicableUsage =
         Quantity.of(currentlyMeasuredTotal)
             .subtract(contractAmount)
@@ -234,6 +209,11 @@ public class BillableUsageController {
       log.debug("Nothing to remit. Remittance record will not be created.");
     }
 
+    // There were issues with transmitting usage to AWS since the cost event timestamps were in the
+    // past. This modification allows us to send usage to AWS if we get it during the current hour
+    // of event tally.
+    usage.setSnapshotDate(usageCalc.getRemittanceDate());
+
     log.info(
         "Finished producing monthly billable for orgId={} productId={} uom={} provider={}, snapshotDate={}",
         usage.getOrgId(),
@@ -248,22 +228,24 @@ public class BillableUsageController {
     var newRemittance =
         BillableUsageRemittanceEntity.builder()
             .key(BillableUsageRemittanceEntityPK.keyFrom(usage, clock.now()))
+            .tallyId(usage.getId())
+            .hardwareMeasurementType(usage.getHardwareMeasurementType())
             .build();
     // Remitted value should be set to usages metric_value rather than billing_value
     newRemittance.setRemittedPendingValue(usageCalc.getRemittedValue());
     newRemittance.getKey().setRemittancePendingDate(usageCalc.getRemittanceDate());
-    newRemittance.setAccountNumber(usage.getAccountNumber());
     log.debug("Creating new remittance for update: {}", newRemittance);
     billableUsageRemittanceRepository.save(newRemittance);
   }
 
   private Double getCurrentlyMeasuredTotal(
       BillableUsage usage, OffsetDateTime beginning, OffsetDateTime ending) {
-    // NOTE: We are filtering billable usage to PHYSICAL hardware as that's the only
-    //       hardware type set when metering.
+    HardwareMeasurementType hardwareMeasurementType =
+        Optional.ofNullable(usage.getHardwareMeasurementType())
+            .map(HardwareMeasurementType::fromString)
+            .orElse(HardwareMeasurementType.PHYSICAL);
     TallyMeasurementKey measurementKey =
-        new TallyMeasurementKey(
-            HardwareMeasurementType.PHYSICAL, Uom.fromValue(usage.getUom().value()));
+        new TallyMeasurementKey(hardwareMeasurementType, usage.getUom());
     return snapshotRepository.sumMeasurementValueForPeriod(
         usage.getOrgId(),
         usage.getProductId(),
@@ -275,5 +257,20 @@ public class BillableUsageController {
         beginning,
         ending,
         measurementKey);
+  }
+
+  public void updateBillableUsageRemittanceWithRetryAfter(
+      BillableUsage billableUsage, OffsetDateTime retryAfter) {
+    var billableUsageRemittance =
+        billableUsageRemittanceRepository.findById(
+            BillableUsageRemittanceEntityPK.keyFrom(
+                billableUsage, billableUsage.getSnapshotDate()));
+    if (billableUsageRemittance.isPresent()) {
+      billableUsageRemittance.get().setRetryAfter(retryAfter);
+      billableUsageRemittanceRepository.save(billableUsageRemittance.get());
+    } else {
+      log.warn(
+          "Unable to find billable usage to update retry_after. BillableUsage: {}", billableUsage);
+    }
   }
 }

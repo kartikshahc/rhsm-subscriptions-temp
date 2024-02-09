@@ -22,6 +22,7 @@ package org.candlepin.subscriptions.db;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -34,7 +35,6 @@ import org.candlepin.subscriptions.db.model.HostBucketKey;
 import org.candlepin.subscriptions.db.model.HostTallyBucket;
 import org.candlepin.subscriptions.db.model.ServiceLevel;
 import org.candlepin.subscriptions.db.model.Usage;
-import org.candlepin.subscriptions.json.Measurement.Uom;
 import org.candlepin.subscriptions.tally.InventoryAccountUsageCollector;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -168,16 +168,10 @@ class HostTallyBucketRepositoryTest {
   }
 
   private Host createHost(String inventoryId, String orgId) {
-    Host host =
-        new Host(
-            inventoryId,
-            "INSIGHTS_" + inventoryId,
-            orgId + "_ACCOUNT",
-            orgId,
-            "SUBMAN_" + inventoryId);
+    Host host = new Host(inventoryId, "INSIGHTS_" + inventoryId, orgId, "SUBMAN_" + inventoryId);
     host.setDisplayName(orgId);
-    host.setMeasurement(Uom.SOCKETS, 1.0);
-    host.setMeasurement(Uom.CORES, 1.0);
+    host.setMeasurement(MetricIdUtils.getSockets().getValue(), 1.0);
+    host.setMeasurement(MetricIdUtils.getCores().getValue(), 1.0);
     return host;
   }
 }

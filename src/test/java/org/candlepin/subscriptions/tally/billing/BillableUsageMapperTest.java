@@ -22,48 +22,87 @@ package org.candlepin.subscriptions.tally.billing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinitionRegistry;
+import com.redhat.swatch.configuration.registry.Variant;
+import java.lang.reflect.Field;
 import java.time.OffsetDateTime;
 import java.util.List;
-import java.util.Set;
 import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
 import org.candlepin.subscriptions.json.BillableUsage;
 import org.candlepin.subscriptions.json.TallyMeasurement;
-import org.candlepin.subscriptions.json.TallyMeasurement.Uom;
 import org.candlepin.subscriptions.json.TallySnapshot;
 import org.candlepin.subscriptions.json.TallySnapshot.BillingProvider;
 import org.candlepin.subscriptions.json.TallySnapshot.Granularity;
 import org.candlepin.subscriptions.json.TallySnapshot.Sla;
 import org.candlepin.subscriptions.json.TallySnapshot.Usage;
 import org.candlepin.subscriptions.json.TallySummary;
-import org.candlepin.subscriptions.registry.TagMetaData;
-import org.candlepin.subscriptions.registry.TagProfile;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class BillableUsageMapperTest {
+  private static SubscriptionDefinitionRegistry originalReference;
+  private SubscriptionDefinitionRegistry subscriptionDefinitionRegistry;
 
-  private TagProfile tagProfile;
+  private static String STORAGE_GIBIBYTES = "Storage-gibibytes";
+
+  @BeforeAll
+  static void setupClass() throws Exception {
+    Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+    instance.setAccessible(true);
+    originalReference =
+        (SubscriptionDefinitionRegistry) instance.get(SubscriptionDefinitionRegistry.class);
+  }
+
+  @AfterAll
+  static void tearDown() throws Exception {
+    Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+    instance.setAccessible(true);
+    instance.set(instance, originalReference);
+  }
 
   @BeforeEach
-  void setup() {
-    tagProfile = new TagProfile();
-    TagMetaData tagMetaData = new TagMetaData();
-    tagMetaData.setTags(Set.of("rhosak"));
-    tagMetaData.setBillingModel("PAYG");
-    tagProfile.setTagMetaData(List.of(tagMetaData));
-    tagProfile.setTagMetrics(List.of());
-    tagProfile.setTagMappings(List.of());
-    tagProfile.initLookups();
+  void setupTest() {
+    subscriptionDefinitionRegistry = mock(SubscriptionDefinitionRegistry.class);
+    setMock(subscriptionDefinitionRegistry);
+    var variant = Variant.builder().tag("rosa").build();
+    var awsMetric =
+        com.redhat.swatch.configuration.registry.Metric.builder()
+            .awsDimension("AWS_METRIC_ID")
+            .id("Cores")
+            .build();
+    var subscriptionDefinition =
+        SubscriptionDefinition.builder()
+            .variants(List.of(variant))
+            .metrics(List.of(awsMetric))
+            .build();
+    variant.setSubscription(subscriptionDefinition);
+    when(subscriptionDefinitionRegistry.getSubscriptions())
+        .thenReturn(List.of(subscriptionDefinition));
+  }
+
+  private void setMock(SubscriptionDefinitionRegistry mock) {
+    try {
+      Field instance = SubscriptionDefinitionRegistry.class.getDeclaredField("instance");
+      instance.setAccessible(true);
+      instance.set(instance, mock);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
   }
 
   @Test
   void shouldSkipNonPaygProducts() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     assertTrue(
         mapper
             .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
+                createExampleTallySummaryWithOrgId(
                     "RHEL",
                     Granularity.HOURLY,
                     Sla.STANDARD,
@@ -76,12 +115,12 @@ class BillableUsageMapperTest {
 
   @Test
   void shouldSkipAnySla() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     assertTrue(
         mapper
             .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
-                    "rhosak",
+                createExampleTallySummaryWithOrgId(
+                    "rosa",
                     Granularity.HOURLY,
                     Sla.ANY,
                     Usage.PRODUCTION,
@@ -93,12 +132,12 @@ class BillableUsageMapperTest {
 
   @Test
   void shouldSkipAnyUsage() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     assertTrue(
         mapper
             .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
-                    "rhosak",
+                createExampleTallySummaryWithOrgId(
+                    "rosa",
                     Granularity.HOURLY,
                     Sla.STANDARD,
                     Usage.ANY,
@@ -110,12 +149,12 @@ class BillableUsageMapperTest {
 
   @Test
   void shouldSkipAnyBillingProvider() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     assertTrue(
         mapper
             .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
-                    "rhosak",
+                createExampleTallySummaryWithOrgId(
+                    "rosa",
                     Granularity.HOURLY,
                     Sla.STANDARD,
                     Usage.PRODUCTION,
@@ -127,12 +166,12 @@ class BillableUsageMapperTest {
 
   @Test
   void shouldSkipAnyBillingAccountId() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     assertTrue(
         mapper
             .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
-                    "rhosak",
+                createExampleTallySummaryWithOrgId(
+                    "rosa",
                     Granularity.HOURLY,
                     Sla.STANDARD,
                     Usage.PRODUCTION,
@@ -143,54 +182,26 @@ class BillableUsageMapperTest {
   }
 
   @Test
-  void shouldProduceBillableUsage_WhenAccountNumberPresent() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
-    BillableUsage expected =
-        new BillableUsage()
-            .withAccountNumber("123")
-            .withProductId("rhosak")
-            .withSnapshotDate(OffsetDateTime.MIN)
-            .withUsage(BillableUsage.Usage.PRODUCTION)
-            .withSla(BillableUsage.Sla.STANDARD)
-            .withBillingProvider(BillableUsage.BillingProvider.AWS)
-            .withBillingAccountId("bill123")
-            .withUom(BillableUsage.Uom.STORAGE_GIBIBYTES)
-            .withValue(42.0);
-    assertEquals(
-        expected,
-        mapper
-            .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
-                    "rhosak",
-                    Granularity.HOURLY,
-                    Sla.STANDARD,
-                    Usage.PRODUCTION,
-                    BillingProvider.AWS,
-                    "bill123"))
-            .findAny()
-            .orElseThrow());
-  }
-
-  @Test
   void shouldProduceBillableUsage_WhenOrgIdPresent() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     BillableUsage expected =
         new BillableUsage()
             .withOrgId("org123")
-            .withProductId("rhosak")
+            .withProductId("rosa")
             .withSnapshotDate(OffsetDateTime.MIN)
             .withUsage(BillableUsage.Usage.PRODUCTION)
             .withSla(BillableUsage.Sla.STANDARD)
             .withBillingProvider(BillableUsage.BillingProvider.AWS)
             .withBillingAccountId("bill123")
-            .withUom(BillableUsage.Uom.STORAGE_GIBIBYTES)
-            .withValue(42.0);
+            .withUom("Storage-gibibytes")
+            .withValue(42.0)
+            .withHardwareMeasurementType(HardwareMeasurementType.PHYSICAL.toString());
     assertEquals(
         expected,
         mapper
             .fromTallySummary(
                 createExampleTallySummaryWithOrgId(
-                    "rhosak",
+                    "rosa",
                     Granularity.HOURLY,
                     Sla.STANDARD,
                     Usage.PRODUCTION,
@@ -202,12 +213,12 @@ class BillableUsageMapperTest {
 
   @Test
   void shouldSkipNonDailySnapshots() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     assertTrue(
         mapper
             .fromTallySummary(
-                createExampleTallySummaryWithAccountNumber(
-                    "rhosak",
+                createExampleTallySummaryWithOrgId(
+                    "rosa",
                     Granularity.YEARLY,
                     Sla.STANDARD,
                     Usage.PRODUCTION,
@@ -219,50 +230,12 @@ class BillableUsageMapperTest {
 
   @Test
   void shouldSkipSummaryWithNoMeasurements() {
-    BillableUsageMapper mapper = new BillableUsageMapper(tagProfile);
+    BillableUsageMapper mapper = new BillableUsageMapper();
     TallySummary tallySummary =
-        createExampleTallySummaryWithAccountNumber(
-            "rhosak",
-            Granularity.HOURLY,
-            Sla.STANDARD,
-            Usage.PRODUCTION,
-            BillingProvider.AWS,
-            "123");
+        createExampleTallySummaryWithOrgId(
+            "rosa", Granularity.HOURLY, Sla.STANDARD, Usage.PRODUCTION, BillingProvider.AWS, "123");
     tallySummary.getTallySnapshots().get(0).setTallyMeasurements(null);
     assertTrue(mapper.fromTallySummary(tallySummary).findAny().isEmpty());
-  }
-
-  TallySummary createExampleTallySummaryWithAccountNumber(
-      String productId,
-      Granularity granularity,
-      Sla sla,
-      Usage usage,
-      BillingProvider billingProvider,
-      String billingAccountId) {
-    return new TallySummary()
-        .withAccountNumber("123")
-        .withTallySnapshots(
-            List.of(
-                new TallySnapshot()
-                    .withSnapshotDate(OffsetDateTime.MIN)
-                    .withProductId(productId)
-                    .withGranularity(granularity)
-                    .withTallyMeasurements(
-                        List.of(
-                            new TallyMeasurement()
-                                .withUom(Uom.STORAGE_GIBIBYTES)
-                                .withHardwareMeasurementType(
-                                    HardwareMeasurementType.PHYSICAL.toString())
-                                .withValue(42.0),
-                            new TallyMeasurement()
-                                .withUom(Uom.STORAGE_GIBIBYTES)
-                                .withHardwareMeasurementType(
-                                    HardwareMeasurementType.TOTAL.toString())
-                                .withValue(42.0)))
-                    .withSla(sla)
-                    .withUsage(usage)
-                    .withBillingProvider(billingProvider)
-                    .withBillingAccountId(billingAccountId)));
   }
 
   TallySummary createExampleTallySummaryWithOrgId(
@@ -283,12 +256,12 @@ class BillableUsageMapperTest {
                     .withTallyMeasurements(
                         List.of(
                             new TallyMeasurement()
-                                .withUom(Uom.STORAGE_GIBIBYTES)
+                                .withUom(STORAGE_GIBIBYTES)
                                 .withHardwareMeasurementType(
                                     HardwareMeasurementType.PHYSICAL.toString())
                                 .withValue(42.0),
                             new TallyMeasurement()
-                                .withUom(Uom.STORAGE_GIBIBYTES)
+                                .withUom(STORAGE_GIBIBYTES)
                                 .withHardwareMeasurementType(
                                     HardwareMeasurementType.TOTAL.toString())
                                 .withValue(42.0)))

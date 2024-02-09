@@ -24,6 +24,10 @@
         {
           "code": "PRODUCT_NAME",
           "value": "RHEL Server"
+        },
+        {
+          "code": "METERED",
+          "value": "Y"
         }
       ],
       "roles": [

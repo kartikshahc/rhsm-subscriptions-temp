@@ -3,6 +3,26 @@ info:
   title: "internal-organizations-sync-api"
   description: "REST interface for the internal-organization-sync service. Please note any deprecated APIs. Our current deprecation policy is to keep deprecated APIs around for at least 6 months."
   version: 1.0.0
+servers:
+  - url: /{PATH_PREFIX}/{APP_NAME}/v1
+    variables:
+      PATH_PREFIX:
+        default: api
+      APP_NAME:
+        default: rhsm-subscriptions
+  - url: https://{HOSTNAME}/{PATH_PREFIX}/{APP_NAME}/v1
+    variables:
+      HOSTNAME:
+        enum:
+          - ci.cloud.redhat.com
+          - qa.cloud.redhat.com
+          - stage.cloud.redhat.com
+          - cloud.redhat.com
+        default: ci.cloud.redhat.com
+      PATH_PREFIX:
+        default: api
+      APP_NAME:
+        default: rhsm-subscriptions
 paths:
   /internal/rpc/syncOrg:
     description: "Trigger a sync for a given Org ID"
@@ -190,8 +210,6 @@ components:
           type: string
         org_id:
           type: string
-        account_number:
-          type: string
         os_name:
           type: string
         os_version:
@@ -221,6 +239,10 @@ components:
         cpu_cores:
           type: integer
         cores_per_socket:
+          type: integer
+        number_of_cpus:
+          type: integer
+        threads_per_core:
           type: integer
         last_checkin:
           type: string
@@ -265,6 +287,11 @@ components:
           type: string
         is_marketplace:
           type: boolean
+        provider_id:
+          type: string
+        provider_type:
+          type: string
+          enum: [ aws, azure, gcp ]
     DefaultResponse:
       properties:
         status:

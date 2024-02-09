@@ -54,10 +54,11 @@ import lombok.Setter;
             @ColumnResult(name = "system_profile_infrastructure_type"),
             @ColumnResult(name = "system_profile_cores_per_socket"),
             @ColumnResult(name = "system_profile_sockets"),
+            @ColumnResult(name = "system_profile_cpus"),
+            @ColumnResult(name = "system_profile_threads_per_core"),
             @ColumnResult(name = "system_profile_arch"),
             @ColumnResult(name = "is_marketplace"),
             @ColumnResult(name = "qpc_products"),
-            @ColumnResult(name = "qpc_product_ids"),
             @ColumnResult(name = "system_profile_product_ids"),
             @ColumnResult(name = "syspurpose_role"),
             @ColumnResult(name = "syspurpose_sla"),
@@ -113,6 +114,8 @@ import lombok.Setter;
         h.system_profile_facts->>'infrastructure_type' as system_profile_infrastructure_type,
         h.system_profile_facts->>'cores_per_socket' as system_profile_cores_per_socket,
         h.system_profile_facts->>'number_of_sockets' as system_profile_sockets,
+        h.system_profile_facts->>'number_of_cpus' as system_profile_cpus,
+        h.system_profile_facts->>'threads_per_core' as system_profile_threads_per_core,
         h.system_profile_facts->>'cloud_provider' as cloud_provider,
         h.system_profile_facts->>'arch' as system_profile_arch,
         h.system_profile_facts->>'is_marketplace' as is_marketplace,
@@ -120,7 +123,6 @@ import lombok.Setter;
         h.canonical_facts->>'insights_id' as insights_id,
         rhsm_products.products,
         qpc_prods.qpc_products,
-        qpc_certs.qpc_product_ids,
         system_profile.system_profile_product_ids,
         h.stale_timestamp,
         coalesce(
@@ -138,9 +140,6 @@ import lombok.Setter;
         cross join lateral (
             select string_agg(items, ',') as qpc_products
             from jsonb_array_elements_text(h.facts->'qpc'->'rh_products_installed') as items) qpc_prods
-        cross join lateral (
-            select string_agg(items, ',') as qpc_product_ids
-            from jsonb_array_elements_text(h.facts->'qpc'->'rh_product_certs') as items) qpc_certs
         cross join lateral (
             select string_agg(items->>'id', ',') as system_profile_product_ids
             from jsonb_array_elements(h.system_profile_facts->'installed_products') as items) system_profile

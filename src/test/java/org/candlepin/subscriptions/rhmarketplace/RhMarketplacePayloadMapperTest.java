@@ -20,8 +20,6 @@
  */
 package org.candlepin.subscriptions.rhmarketplace;
 
-import static org.candlepin.subscriptions.utilization.api.model.ProductId.OPENSHIFT_DEDICATED_METRICS;
-import static org.candlepin.subscriptions.utilization.api.model.ProductId.OPENSHIFT_METRICS;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.params.ParameterizedTest.DEFAULT_DISPLAY_NAME;
 import static org.junit.jupiter.params.ParameterizedTest.DISPLAY_NAME_PLACEHOLDER;
@@ -30,22 +28,20 @@ import static org.mockito.Mockito.*;
 import com.redhat.swatch.clients.internal.subscriptions.api.client.ApiException;
 import com.redhat.swatch.clients.internal.subscriptions.api.model.RhmUsageContext;
 import com.redhat.swatch.clients.internal.subscriptions.api.resources.InternalSubscriptionsApi;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
+import lombok.Getter;
 import org.candlepin.subscriptions.json.BillableUsage;
 import org.candlepin.subscriptions.json.BillableUsage.BillingProvider;
 import org.candlepin.subscriptions.json.BillableUsage.Sla;
-import org.candlepin.subscriptions.json.BillableUsage.Uom;
 import org.candlepin.subscriptions.json.BillableUsage.Usage;
-import org.candlepin.subscriptions.json.TallyMeasurement;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.candlepin.subscriptions.rhmarketplace.api.model.UsageEvent;
 import org.candlepin.subscriptions.rhmarketplace.api.model.UsageMeasurement;
-import org.candlepin.subscriptions.user.AccountService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -56,18 +52,15 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.retry.RetryCallback;
 import org.springframework.retry.RetryContext;
+import org.springframework.retry.RetryListener;
 import org.springframework.retry.backoff.NoBackOffPolicy;
-import org.springframework.retry.listener.RetryListenerSupport;
 import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
 
 @ExtendWith(MockitoExtension.class)
 class RhMarketplacePayloadMapperTest {
 
-  @Mock TagProfile tagProfile;
   @Mock InternalSubscriptionsApi subscriptionsApi;
-
-  @Mock AccountService accountService;
 
   RhMarketplacePayloadMapper rhMarketplacePayloadMapper;
 
@@ -76,26 +69,7 @@ class RhMarketplacePayloadMapperTest {
     RetryTemplate retry = new RetryTemplate();
     retry.setBackOffPolicy(new NoBackOffPolicy());
 
-    rhMarketplacePayloadMapper =
-        new RhMarketplacePayloadMapper(tagProfile, accountService, subscriptionsApi, retry);
-
-    // Tell Mockito not to complain if some of these mocks aren't used in a particular test
-    lenient()
-        .when(
-            tagProfile.rhmMetricIdForTagAndUom(
-                OPENSHIFT_METRICS.toString(), TallyMeasurement.Uom.CORES))
-        .thenReturn("redhat.com:openshift:cpu_hour");
-
-    lenient()
-        .when(
-            tagProfile.rhmMetricIdForTagAndUom(
-                OPENSHIFT_DEDICATED_METRICS.toString(), TallyMeasurement.Uom.CORES))
-        .thenReturn(RhMarketplacePayloadMapper.OPENSHIFT_DEDICATED_4_CPU_HOUR);
-
-    lenient()
-        .when(tagProfile.isProductPAYGEligible(OPENSHIFT_DEDICATED_METRICS.toString()))
-        .thenReturn(true);
-    lenient().when(tagProfile.isProductPAYGEligible(OPENSHIFT_METRICS.toString())).thenReturn(true);
+    rhMarketplacePayloadMapper = new RhMarketplacePayloadMapper(subscriptionsApi, retry);
   }
 
   @Test
@@ -107,7 +81,6 @@ class RhMarketplacePayloadMapperTest {
             any(OffsetDateTime.class),
             any(String.class),
             any(String.class),
-            any(String.class),
             any(String.class)))
         .thenReturn(rhmUsageContext);
 
@@ -116,25 +89,24 @@ class RhMarketplacePayloadMapperTest {
     OffsetDateTime snapshotDate =
         OffsetDateTime.ofInstant(Instant.ofEpochMilli(snapshotDateLong), ZoneId.of("UTC"));
 
-    String account = "test123";
     String orgId = "org123";
     var usage =
         new BillableUsage()
             .withId(UUID.fromString("c204074d-626f-4272-aa05-b6d69d6de16a"))
-            .withAccountNumber(account)
+            .withOrgId(orgId)
             .withProductId("OpenShift-metrics")
             .withSnapshotDate(snapshotDate)
             .withUsage(Usage.PRODUCTION)
-            .withUom(Uom.CORES)
+            .withUom(MetricIdUtils.getCores().toUpperCaseFormatted())
             .withValue(36.0)
             .withSla(Sla.PREMIUM)
             .withBillingProvider(BillingProvider.RED_HAT)
             .withBillingAccountId("sellerAccountId");
 
-    when(accountService.lookupOrgId(account)).thenReturn(orgId);
-
     var usageMeasurement =
-        new UsageMeasurement().value(36.0).metricId("redhat.com:openshift:cpu_hour");
+        new UsageMeasurement()
+            .value(36.0)
+            .metricId("redhat.com:openshift_container_platform:cpu_hour");
     var expected =
         new UsageEvent()
             .start(snapshotDateLong)
@@ -158,7 +130,6 @@ class RhMarketplacePayloadMapperTest {
             any(OffsetDateTime.class),
             any(String.class),
             any(String.class),
-            any(String.class),
             any(String.class)))
         .thenReturn(rhmUsageContext);
 
@@ -167,22 +138,19 @@ class RhMarketplacePayloadMapperTest {
     OffsetDateTime snapshotDate =
         OffsetDateTime.ofInstant(Instant.ofEpochMilli(snapshotDateLong), ZoneId.of("UTC"));
 
-    String account = "test123";
     String orgId = "org123";
     var usage =
         new BillableUsage()
             .withId(UUID.fromString("c204074d-626f-4272-aa05-b6d69d6de16a"))
-            .withAccountNumber(account)
             .withProductId("OpenShift-metrics")
+            .withOrgId(orgId)
             .withSnapshotDate(snapshotDate)
             .withUsage(Usage.PRODUCTION)
-            .withUom(Uom.CORES)
+            .withUom(MetricIdUtils.getCores().getValue())
             .withValue(36.0)
             .withSla(Sla.PREMIUM)
             .withBillingProvider(BillingProvider.RED_HAT)
             .withBillingAccountId("sellerAccountId");
-
-    when(accountService.lookupOrgId(account)).thenReturn(orgId);
 
     assertNull(rhMarketplacePayloadMapper.produceUsageEvent(usage));
     assertTrue(rhMarketplacePayloadMapper.createUsageRequest(usage).getData().isEmpty());
@@ -251,7 +219,7 @@ class RhMarketplacePayloadMapperTest {
                 .withBillingProvider(BillingProvider.GCP),
             false);
 
-    Arguments notEligableDefaultBillableUsage = Arguments.of(new BillableUsage(), false);
+    Arguments notEligibleDefaultBillableUsage = Arguments.of(new BillableUsage(), false);
 
     return Stream.of(
         eligibleRedHatBillingProvider,
@@ -260,7 +228,7 @@ class RhMarketplacePayloadMapperTest {
         notEligibleAzureBillingProvider,
         notEligibleOracleBillingProvider,
         notEligibleGcpBillingProvider,
-        notEligableDefaultBillableUsage);
+        notEligibleDefaultBillableUsage);
   }
 
   @Test
@@ -278,18 +246,15 @@ class RhMarketplacePayloadMapperTest {
             any(OffsetDateTime.class),
             any(String.class),
             any(String.class),
-            any(String.class),
             any(String.class)))
         .thenThrow(ApiException.class);
 
-    RhMarketplacePayloadMapper mapper =
-        new RhMarketplacePayloadMapper(tagProfile, accountService, subscriptionsApi, retry);
+    RhMarketplacePayloadMapper mapper = new RhMarketplacePayloadMapper(subscriptionsApi, retry);
 
     BillableUsage billableUsage =
         new BillableUsage()
             .withOrgId("org")
             .withSnapshotDate(OffsetDateTime.now())
-            .withAccountNumber("account")
             .withProductId("product")
             .withSla(Sla.PREMIUM)
             .withUsage(Usage.PRODUCTION);
@@ -304,7 +269,8 @@ class RhMarketplacePayloadMapperTest {
    * A retry test support class that will increment a counter whenever an error occurs and the retry
    * logic is run.
    */
-  private class RetryTestSupport extends RetryListenerSupport {
+  @Getter
+  private static class RetryTestSupport implements RetryListener {
 
     private int retryCount = 0;
 
@@ -312,10 +278,6 @@ class RhMarketplacePayloadMapperTest {
     public <T, E extends Throwable> void onError(
         RetryContext context, RetryCallback<T, E> callback, Throwable throwable) {
       retryCount++;
-    }
-
-    public int getRetryCount() {
-      return retryCount;
     }
   }
 }

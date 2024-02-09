@@ -25,8 +25,9 @@ import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.ApplicationProperties;
-import org.candlepin.subscriptions.db.AccountConfigRepository;
+import org.candlepin.subscriptions.db.OrgConfigRepository;
 import org.candlepin.subscriptions.tally.TallyTaskQueueConfiguration;
 import org.candlepin.subscriptions.task.TaskDescriptor;
 import org.candlepin.subscriptions.task.TaskManagerException;
@@ -34,8 +35,8 @@ import org.candlepin.subscriptions.task.TaskQueueProperties;
 import org.candlepin.subscriptions.task.TaskType;
 import org.candlepin.subscriptions.task.queue.TaskProducerConfiguration;
 import org.candlepin.subscriptions.task.queue.TaskQueue;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.util.DateRange;
+import org.candlepin.subscriptions.util.LogUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,7 +60,7 @@ public class CaptureSnapshotsTaskManager {
   private final TaskQueue queue;
   private final ApplicationClock applicationClock;
 
-  private final AccountConfigRepository accountRepo;
+  private final OrgConfigRepository orgRepo;
 
   @Autowired
   public CaptureSnapshotsTaskManager(
@@ -67,13 +68,13 @@ public class CaptureSnapshotsTaskManager {
       @Qualifier("tallyTaskQueueProperties") TaskQueueProperties tallyTaskQueueProperties,
       TaskQueue queue,
       ApplicationClock applicationClock,
-      AccountConfigRepository accountRepo) {
+      OrgConfigRepository orgRepo) {
 
     this.appProperties = appProperties;
     this.taskQueueProperties = tallyTaskQueueProperties;
     this.queue = queue;
     this.applicationClock = applicationClock;
-    this.accountRepo = accountRepo;
+    this.orgRepo = orgRepo;
   }
 
   /**
@@ -83,10 +84,12 @@ public class CaptureSnapshotsTaskManager {
    */
   @SuppressWarnings("indentation")
   public void updateOrgSnapshots(String orgId) {
+    LogUtils.addOrgIdToMdc(orgId);
     queue.enqueue(
-        TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic())
+        TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic(), orgId)
             .setSingleValuedArg("orgs", orgId)
             .build());
+    LogUtils.clearOrgIdFromMdc();
   }
 
   /**
@@ -96,19 +99,22 @@ public class CaptureSnapshotsTaskManager {
    */
   @Transactional
   public void updateSnapshotsForAllOrg() {
-    try (Stream<String> orgStream = accountRepo.findSyncEnabledOrgs()) {
+    try (Stream<String> orgStream = orgRepo.findSyncEnabledOrgs()) {
       log.info("Queuing all org snapshot production in batches of size one");
 
       AtomicInteger count = new AtomicInteger(0);
       orgStream.forEach(
           org -> {
+            LogUtils.addOrgIdToMdc(org);
             queue.enqueue(
-                TaskDescriptor.builder(TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic())
+                TaskDescriptor.builder(
+                        TaskType.UPDATE_SNAPSHOTS, taskQueueProperties.getTopic(), org)
                     .setSingleValuedArg("orgs", org)
                     .build());
             count.addAndGet(1);
           });
 
+      LogUtils.clearOrgIdFromMdc();
       log.info("Done queuing snapshot production for {} org list.", count.intValue());
     } catch (Exception e) {
       throw new TaskManagerException("Could not list org for update snapshot task generation", e);
@@ -116,7 +122,8 @@ public class CaptureSnapshotsTaskManager {
   }
 
   public void tallyOrgByHourly(String orgId, DateRange tallyRange) {
-    if (!applicationClock.isHourlyRange(tallyRange)) {
+    LogUtils.addOrgIdToMdc(orgId);
+    if (!applicationClock.isHourlyRange(tallyRange.getStartDate(), tallyRange.getEndDate())) {
       log.error(
           "Hourly snapshot production for orgId {} will not be queued. "
               + "Invalid start/end times specified.",
@@ -134,16 +141,18 @@ public class CaptureSnapshotsTaskManager {
         tallyRange.getEndString());
 
     queue.enqueue(
-        TaskDescriptor.builder(TaskType.UPDATE_HOURLY_SNAPSHOTS, taskQueueProperties.getTopic())
+        TaskDescriptor.builder(
+                TaskType.UPDATE_HOURLY_SNAPSHOTS, taskQueueProperties.getTopic(), orgId)
             .setSingleValuedArg("orgId", orgId)
             .setSingleValuedArg("startDateTime", tallyRange.getStartString())
             .setSingleValuedArg("endDateTime", tallyRange.getEndString())
             .build());
+    LogUtils.clearOrgIdFromMdc();
   }
 
   @Transactional
   public void updateHourlySnapshotsForAllOrgs(Optional<DateRange> dateRange) {
-    try (Stream<String> orgStream = accountRepo.findSyncEnabledOrgs()) {
+    try (Stream<String> orgStream = orgRepo.findSyncEnabledOrgs()) {
       AtomicInteger count = new AtomicInteger(0);
 
       OffsetDateTime startDateTime;

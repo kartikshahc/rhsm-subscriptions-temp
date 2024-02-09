@@ -21,10 +21,12 @@
 package org.candlepin.subscriptions.tally;
 
 import com.google.common.collect.Sets;
+import com.redhat.swatch.configuration.util.MetricIdUtils;
 import io.micrometer.core.annotation.Timed;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManager;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -42,7 +44,6 @@ import org.candlepin.subscriptions.db.HostTallyBucketRepository;
 import org.candlepin.subscriptions.db.model.*;
 import org.candlepin.subscriptions.inventory.db.InventoryDatabaseOperations;
 import org.candlepin.subscriptions.inventory.db.model.InventoryHostFacts;
-import org.candlepin.subscriptions.json.Measurement;
 import org.candlepin.subscriptions.tally.UsageCalculation.Key;
 import org.candlepin.subscriptions.tally.collector.ProductUsageCollectorFactory;
 import org.candlepin.subscriptions.tally.facts.FactNormalizer;
@@ -99,12 +100,12 @@ public class InventoryAccountUsageCollector {
 
   @SuppressWarnings("squid:S3776")
   @Transactional
-  public OrgHostsData collect(Set<String> products, String account, String orgId) {
+  public OrgHostsData collect(Set<String> products, String orgId) {
     int inventoryCount = inventory.activeSystemCountForOrgId(orgId, culledOffsetDays);
     if (inventoryCount > tallyMaxHbiAccountSize) {
       throw new SystemThresholdException(orgId, tallyMaxHbiAccountSize, inventoryCount);
     }
-    AccountServiceInventory accountServiceInventory = fetchAccountServiceInventory(orgId, account);
+    AccountServiceInventory accountServiceInventory = fetchAccountServiceInventory(orgId);
     Map<String, Host> inventoryHostMap = buildInventoryHostMap(accountServiceInventory);
 
     OrgHostsData orgHostsData = new OrgHostsData(orgId);
@@ -214,6 +215,7 @@ public class InventoryAccountUsageCollector {
     return orgHostsData;
   }
 
+  @Timed("rhsm-subscriptions.tally.inventory.db")
   @Transactional
   public AccountUsageCalculation tally(String orgId) {
     log.info("Running tally via DB for orgId={}", orgId);
@@ -222,14 +224,6 @@ public class InventoryAccountUsageCollector {
         tallyBucketRepository.tallyHostBuckets(orgId, HBI_INSTANCE_TYPE)) {
       tallyStream.forEach(
           bucketTally -> {
-            String currentAccount = calculation.getAccount();
-            String hostAccount = bucketTally.getAccountNumber();
-
-            // Set the account number if it is available
-            if (Objects.isNull(currentAccount) && Objects.nonNull(hostAccount)) {
-              calculation.setAccount(bucketTally.getAccountNumber());
-            }
-
             UsageCalculation usageCalc =
                 calculation.getOrCreateCalculation(
                     new Key(
@@ -282,19 +276,13 @@ public class InventoryAccountUsageCollector {
         .collect(Collectors.toSet());
   }
 
-  private AccountServiceInventory fetchAccountServiceInventory(String orgId, String account) {
-    log.info("Finding HBI hosts for account={} org={}", account, orgId);
+  private AccountServiceInventory fetchAccountServiceInventory(String orgId) {
+    log.info("Finding HBI hosts for org={}", orgId);
     AccountServiceInventoryId inventoryId =
         AccountServiceInventoryId.builder().orgId(orgId).serviceType(HBI_INSTANCE_TYPE).build();
-    AccountServiceInventory accountServiceInventory =
-        accountServiceInventoryRepository
-            .findById(inventoryId)
-            .orElse(new AccountServiceInventory(inventoryId));
-    if (account != null) {
-      accountServiceInventory.setAccountNumber(account);
-    }
-
-    return accountServiceInventory;
+    return accountServiceInventoryRepository
+        .findById(inventoryId)
+        .orElse(new AccountServiceInventory(inventoryId));
   }
 
   private Map<String, Host> buildInventoryHostMap(AccountServiceInventory accountServiceInventory) {
@@ -331,7 +319,6 @@ public class InventoryAccountUsageCollector {
     }
 
     host.setInsightsId(inventoryHostFacts.getInsightsId());
-    host.setAccountNumber(inventoryHostFacts.getAccount());
     host.setOrgId(inventoryHostFacts.getOrgId());
     host.setDisplayName(inventoryHostFacts.getDisplayName());
     host.setSubscriptionManagerId(inventoryHostFacts.getSubscriptionManagerId());
@@ -339,12 +326,17 @@ public class InventoryAccountUsageCollector {
     host.setHypervisorUuid(normalizedFacts.getHypervisorUuid());
 
     if (normalizedFacts.getCores() != null) {
-      host.getMeasurements().put(Measurement.Uom.CORES, normalizedFacts.getCores().doubleValue());
+      host.getMeasurements()
+          .put(
+              MetricIdUtils.getCores().toUpperCaseFormatted(),
+              normalizedFacts.getCores().doubleValue());
     }
 
     if (normalizedFacts.getSockets() != null) {
       host.getMeasurements()
-          .put(Measurement.Uom.SOCKETS, normalizedFacts.getSockets().doubleValue());
+          .put(
+              MetricIdUtils.getSockets().toUpperCaseFormatted(),
+              normalizedFacts.getSockets().doubleValue());
     }
 
     host.setHypervisor(normalizedFacts.isHypervisor());
@@ -379,21 +371,22 @@ public class InventoryAccountUsageCollector {
   @Transactional
   @Timed("swatch_hbi_system_reconcile")
   public void reconcileSystemDataWithHbi(String orgId, Set<String> applicableProducts) {
-    if (!accountServiceInventoryRepository.existsById(
-        AccountServiceInventoryId.builder().orgId(orgId).serviceType(HBI_INSTANCE_TYPE).build())) {
-      accountServiceInventoryRepository.save(new AccountServiceInventory(orgId, HBI_INSTANCE_TYPE));
-    }
+    accountServiceInventoryRepository.saveIfDoesNotExist(orgId, HBI_INSTANCE_TYPE);
+    List<Host> detachHosts = new ArrayList<>();
     int systemsUpdatedForOrg =
         collator.collateData(
             orgId,
             culledOffsetDays,
             (hbiSystem, swatchSystem, hypervisorData, iterationCount) -> {
               reconcileHbiSystemWithSwatchSystem(
-                  hbiSystem, swatchSystem, hypervisorData, applicableProducts);
+                  hbiSystem, swatchSystem, hypervisorData, applicableProducts, detachHosts);
               if (iterationCount % hbiReconciliationFlushInterval == 0) {
                 log.debug("Flushing system changes w/ count={}", iterationCount);
                 hostRepository.flush();
-                entityManager.clear();
+                if (Objects.nonNull(swatchSystem) && Objects.nonNull(hbiSystem)) {
+                  detachHosts.forEach(entityManager::detach);
+                  detachHosts.clear();
+                }
               }
             });
     log.info("Reconciled {} records for orgId={}", systemsUpdatedForOrg, orgId);
@@ -415,7 +408,8 @@ public class InventoryAccountUsageCollector {
       InventoryHostFacts hbiSystem,
       Host swatchSystem,
       OrgHostsData orgHostsData,
-      Set<String> applicableProducts) {
+      Set<String> applicableProducts,
+      List<Host> hosts) {
     log.debug(
         "Reconciling HBI inventoryId={} & swatch inventoryId={}",
         Optional.ofNullable(hbiSystem).map(InventoryHostFacts::getInventoryId),
@@ -430,10 +424,13 @@ public class InventoryAccountUsageCollector {
       Set<Key> usageKeys = createHostUsageKeys(applicableProducts, normalizedFacts);
       if (swatchSystem != null) {
         log.debug("Updating system w/ inventoryId={}", hbiSystem.getInventoryId());
-        updateSwatchSystem(hbiSystem, normalizedFacts, swatchSystem, usageKeys);
+        Host updatedSwatchSystem =
+            updateSwatchSystem(hbiSystem, normalizedFacts, swatchSystem, usageKeys);
+        hosts.add(updatedSwatchSystem);
       } else {
         log.debug("Creating system w/ inventoryId={}", hbiSystem.getInventoryId());
         swatchSystem = createSwatchSystem(hbiSystem, normalizedFacts, usageKeys);
+        hosts.add(swatchSystem);
       }
       reconcileHypervisorData(normalizedFacts, swatchSystem, orgHostsData, usageKeys);
     }
@@ -488,7 +485,7 @@ public class InventoryAccountUsageCollector {
     host.setInstanceType(HBI_INSTANCE_TYPE);
     populateHostFieldsFromHbi(host, inventoryHostFacts, normalizedFacts);
     applyNonHypervisorBuckets(host, normalizedFacts, usageKeys);
-    hostRepository.save(host);
+    entityManager.persist(host);
     return host;
   }
 
@@ -531,13 +528,13 @@ public class InventoryAccountUsageCollector {
         .removeIf(b -> !b.getKey().getAsHypervisor() && !seenBucketKeys.contains(b.getKey()));
   }
 
-  private void updateSwatchSystem(
+  private Host updateSwatchSystem(
       InventoryHostFacts inventoryHostFacts,
       NormalizedFacts normalizedFacts,
       Host host,
       Set<Key> usageKeys) {
     populateHostFieldsFromHbi(host, inventoryHostFacts, normalizedFacts);
     applyNonHypervisorBuckets(host, normalizedFacts, usageKeys);
-    hostRepository.save(host);
+    return entityManager.merge(host);
   }
 }

@@ -21,9 +21,11 @@ metrics:
   - id: Cores
     rhmMetricId: redhat.com:openshift_data_science:cpu_hours
     awsDimension: cluster_cpu_hour
+    azureDimension: cluster_cpu_hour
     prometheus:
       queryKey: addonSamples
       queryParams:
+        instanceKey: _id
         resourceName: addon-open-data-hub
         metric: cluster:usage:workload:capacity_virtual_cpu_hours
         metadataMetric: ocm_subscription_resource

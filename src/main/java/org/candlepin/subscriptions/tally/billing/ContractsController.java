@@ -20,6 +20,8 @@
  */
 package org.candlepin.subscriptions.tally.billing;
 
+import com.redhat.swatch.configuration.registry.MetricId;
+import com.redhat.swatch.configuration.registry.SubscriptionDefinition;
 import com.redhat.swatch.contracts.api.model.Contract;
 import com.redhat.swatch.contracts.api.model.Metric;
 import com.redhat.swatch.contracts.api.resources.DefaultApi;
@@ -31,9 +33,6 @@ import org.candlepin.subscriptions.exception.ErrorCode;
 import org.candlepin.subscriptions.exception.ExternalServiceException;
 import org.candlepin.subscriptions.json.BillableUsage;
 import org.candlepin.subscriptions.json.BillableUsage.BillingProvider;
-import org.candlepin.subscriptions.json.BillableUsage.Uom;
-import org.candlepin.subscriptions.json.TallyMeasurement;
-import org.candlepin.subscriptions.registry.TagProfile;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Component;
@@ -44,23 +43,19 @@ import org.springframework.util.ObjectUtils;
 @Slf4j
 public class ContractsController {
 
-  private final TagProfile tagProfile;
   private final DefaultApi contractsApi;
 
   @SuppressWarnings("java:S1068")
   private final ContractsClientProperties contractsClientProperties;
 
   public ContractsController(
-      TagProfile tagProfile,
-      DefaultApi contractsApi,
-      ContractsClientProperties contractsClientProperties) {
-    this.tagProfile = tagProfile;
+      DefaultApi contractsApi, ContractsClientProperties contractsClientProperties) {
     this.contractsApi = contractsApi;
     this.contractsClientProperties = contractsClientProperties;
   }
 
   @Retryable(
-      value = ExternalServiceException.class,
+      retryFor = ExternalServiceException.class,
       maxAttemptsExpression = "#{@contractsClientProperties.getMaxAttempts()}",
       backoff =
           @Backoff(
@@ -69,13 +64,14 @@ public class ContractsController {
               multiplierExpression = "#{@contractsClientProperties.getBackOffMultiplier()}"))
   public Double getContractCoverage(BillableUsage usage) throws ContractMissingException {
 
-    if (!tagProfile.isTagContractEnabled(usage.getProductId())) {
+    if (!SubscriptionDefinition.isContractEnabled(usage.getProductId())) {
       throw new IllegalStateException(
           String.format("Product %s is not contract enabled.", usage.getProductId()));
     }
 
     String contractMetricId =
-        getContractMetricId(usage.getBillingProvider(), usage.getProductId(), usage.getUom());
+        getContractMetricId(
+            usage.getBillingProvider(), usage.getProductId(), MetricId.fromString(usage.getUom()));
 
     if (ObjectUtils.isEmpty(contractMetricId)) {
       throw new IllegalStateException(
@@ -121,12 +117,34 @@ public class ContractsController {
     return Double.valueOf(totalUnderContract);
   }
 
-  private String getContractMetricId(BillingProvider billingProvider, String productId, Uom uom) {
-    TallyMeasurement.Uom measurementUom = TallyMeasurement.Uom.fromValue(uom.toString());
+  @Retryable(
+      retryFor = ExternalServiceException.class,
+      maxAttemptsExpression = "#{@contractsClientProperties.getMaxAttempts()}",
+      backoff =
+          @Backoff(
+              delayExpression = "#{@contractsClientProperties.getBackOffInitialInterval()}",
+              maxDelayExpression = "#{@contractsClientProperties.getBackOffMaxInterval()}",
+              multiplierExpression = "#{@contractsClientProperties.getBackOffMultiplier()}"))
+  public void deleteContractsWithOrg(String orgId) {
+    try {
+      contractsApi.deleteContractsByOrg(orgId);
+    } catch (ApiException ex) {
+      throw new ExternalServiceException(
+          ErrorCode.CONTRACTS_SERVICE_ERROR,
+          String.format("Could not delete contracts with org ID '%s'", orgId),
+          ex);
+    }
+  }
+
+  private String getContractMetricId(
+      BillingProvider billingProvider, String productId, MetricId metricId) {
+    String measurementMetricId = metricId.toString();
     if (BillingProvider.AWS.equals(billingProvider)) {
-      return tagProfile.awsDimensionForTagAndUom(productId, measurementUom);
+      return SubscriptionDefinition.getAwsDimension(productId, measurementMetricId);
     } else if (BillingProvider.RED_HAT.equals(billingProvider)) {
-      return tagProfile.rhmMetricIdForTagAndUom(productId, measurementUom);
+      return SubscriptionDefinition.getRhmMetricId(productId, measurementMetricId);
+    } else if (BillingProvider.AZURE.equals(billingProvider)) {
+      return SubscriptionDefinition.getAzureDimension(productId, measurementMetricId);
     }
     return null;
   }

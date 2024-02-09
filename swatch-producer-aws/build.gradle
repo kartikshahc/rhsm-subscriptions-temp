@@ -1,23 +1,17 @@
 plugins {
-    id 'swatch.java-conventions'
-    id 'io.quarkus'
+    id 'swatch.quarkus-conventions'
     id 'org.openapi.generator'
 }
 
 dependencies {
     compileOnly libraries["lombok"]
-    implementation enforcedPlatform(libraries["quarkus-bom"])
     implementation platform(libraries["awssdk-bom"])
-    implementation 'io.quarkus:quarkus-arc'
-    implementation 'io.quarkus:quarkus-config-yaml'
     implementation 'io.quarkus:quarkus-hibernate-validator'
-    implementation 'io.quarkus:quarkus-jacoco'
-    implementation 'io.quarkus:quarkus-jsonb'
+    implementation 'io.quarkus:quarkus-jackson'
     implementation 'io.quarkus:quarkus-logging-json'
     implementation 'io.quarkus:quarkus-micrometer-registry-prometheus'
-    implementation 'io.quarkus:quarkus-openshift'
     implementation 'io.quarkus:quarkus-opentelemetry'
-    implementation 'io.quarkus:quarkus-resteasy-reactive-jsonb'
+    implementation 'io.quarkus:quarkus-resteasy-reactive-jackson'
     implementation 'io.quarkus:quarkus-smallrye-fault-tolerance'
     implementation 'io.quarkus:quarkus-smallrye-health'
     implementation 'io.quarkus:quarkus-smallrye-openapi'
@@ -31,17 +25,17 @@ dependencies {
     implementation project(":clients:swatch-internal-subscription-client")
     implementation project(":swatch-common-resteasy")
     implementation project(":swatch-product-configuration")
-    testImplementation 'io.quarkus:quarkus-junit5'
-    testImplementation 'io.quarkus:quarkus-junit5-mockito'
+    implementation project(":swatch-common-kafka")
+    implementation project(":swatch-common-resteasy-client")
     testImplementation 'io.rest-assured:rest-assured'
     testImplementation 'org.mockito:mockito-junit-jupiter'
     testImplementation 'org.testcontainers:junit-jupiter'
-    testImplementation 'org.testcontainers:kafka'
+    testImplementation 'io.smallrye.reactive:smallrye-reactive-messaging-in-memory'
     testImplementation 'org.testcontainers:postgresql'
     testImplementation 'org.testcontainers:testcontainers'
     testImplementation libraries["junit-jupiter"]
-    testImplementation libraries["wiremock-jre8"]
-
+    testImplementation libraries["wiremock"]
+    testImplementation project(':swatch-common-testcontainers')
 }
 
 compileJava.dependsOn tasks.openApiGenerate
@@ -50,16 +44,17 @@ openApiGenerate {
     generatorName = "java"
     inputSpec = "${projectDir}/src/main/resources/openapi.yaml"
     outputDir = "${buildDir}/generated"
-    apiPackage = "com.redhat.swatch.openapi.resource"
-    modelPackage = "com.redhat.swatch.openapi.model"
-    invokerPackage = "com.redhat.swatch.openapi"
-    groupId = "com.redhat.swatch"
+    apiPackage = "com.redhat.swatch.aws.openapi.resource"
+    modelPackage = "com.redhat.swatch.aws.openapi.model"
+    invokerPackage = "com.redhat.swatch.aws.openapi"
+    groupId = "com.redhat.swatch.aws"
     configOptions = [
             sourceFolder         : "src/gen/java",
             interfaceOnly        : "true",
             library: "microprofile",
             java8: "true",
             dateLibrary: "java8",
+            serializationLibrary: "jackson",
             microprofileRestClientVersion: "3.0",
             useJakartaEE: "true",
     ]
@@ -68,29 +63,7 @@ openApiGenerate {
     ]
 }
 
-processResources {
-    // copy tag profile into the project
-    from("../swatch-core/src/main/resources") {
-        include "tag_profile.yaml"
-    }
-}
-
 // Let gradle know that if billable_usage.yaml changes, openApiGenerate should run
 tasks.openApiGenerate.inputs.file("../swatch-core/schemas/billable_usage.yaml")
 
 sourceSets.main.java.srcDirs += ["${buildDir}/generated/src/gen/java"]
-
-tasks.register('configureQuarkusBuild') {
-  doLast {
-    System.setProperty("quarkus.container-image.tag", project.getVersion().toString().replace("+", "_"))
-  }
-}
-
-tasks.register("wiremock", JavaExec) {
-    description = "Run mock REST services for this service"
-    classpath = sourceSets.test.runtimeClasspath
-    mainClass = "com.redhat.swatch.wiremock.WiremockRunner"
-}
-
-quarkusDev.dependsOn(configureQuarkusBuild)
-quarkusBuild.dependsOn(configureQuarkusBuild)

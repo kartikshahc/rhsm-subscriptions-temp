@@ -20,6 +20,7 @@
  */
 package org.candlepin.subscriptions.tally;
 
+import com.redhat.swatch.configuration.registry.MetricId;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,12 +36,12 @@ import java.util.Set;
 import java.util.function.DoubleBinaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.candlepin.clock.ApplicationClock;
 import org.candlepin.subscriptions.db.TallySnapshotRepository;
 import org.candlepin.subscriptions.db.model.Granularity;
 import org.candlepin.subscriptions.db.model.HardwareMeasurementType;
 import org.candlepin.subscriptions.db.model.TallyMeasurementKey;
 import org.candlepin.subscriptions.db.model.TallySnapshot;
-import org.candlepin.subscriptions.util.ApplicationClock;
 import org.candlepin.subscriptions.util.DateRange;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,6 +61,7 @@ public class CombiningRollupSnapshotStrategy {
 
   private static final Logger log = LoggerFactory.getLogger(CombiningRollupSnapshotStrategy.class);
   private static final Granularity[] GRANULARITIES = {Granularity.HOURLY, Granularity.DAILY};
+  private static final String BAD_GRANULARITY_MESSAGE = "Unsupported granularity: %s";
 
   private final TallySnapshotRepository tallyRepo;
   private final ApplicationClock clock;
@@ -121,13 +123,13 @@ public class CombiningRollupSnapshotStrategy {
                         groupedFinestSnapshots,
                         reductionFunction))
             .flatMap(List::stream)
-            .collect(Collectors.toList());
+            .toList();
 
     // Only want to send messages for finest granularity snapshots that are within affected range
     var finestGranularitySnapshotsInRange =
         finestGranularitySnapshots.stream()
             .filter(snapshot -> affectedRange.contains(snapshot.getSnapshotDate()))
-            .collect(Collectors.toList());
+            .toList();
 
     Map<String, List<TallySnapshot>> totalSnapshotsToSend =
         Stream.of(finestGranularitySnapshotsInRange, rollupSnapshots)
@@ -157,12 +159,10 @@ public class CombiningRollupSnapshotStrategy {
       if (granularityWillBeRolledUp) {
         // need to fetch all component snapshots of the rollups affected
         effectiveStartTime =
-            clock.calculateStartOfRange(reportDateRange.getStartDate(), rollupGranularity);
-        effectiveEndTime =
-            clock.calculateEndOfRange(reportDateRange.getEndDate(), rollupGranularity);
+            calculateStartOfRange(reportDateRange.getStartDate(), rollupGranularity);
+        effectiveEndTime = calculateEndOfRange(reportDateRange.getEndDate(), rollupGranularity);
       } else {
-        effectiveStartTime =
-            clock.calculateStartOfRange(reportDateRange.getStartDate(), granularity);
+        effectiveStartTime = calculateStartOfRange(reportDateRange.getStartDate(), granularity);
         effectiveEndTime = reportDateRange.getEndDate();
       }
 
@@ -204,17 +204,12 @@ public class CombiningRollupSnapshotStrategy {
   }
 
   protected void populateSnapshotFromProductUsageCalculation(
-      TallySnapshot snapshot,
-      String account,
-      String orgId,
-      UsageCalculation productCalc,
-      Granularity granularity) {
+      TallySnapshot snapshot, String orgId, UsageCalculation productCalc, Granularity granularity) {
     snapshot.setProductId(productCalc.getProductId());
     snapshot.setServiceLevel(productCalc.getSla());
     snapshot.setUsage(productCalc.getUsage());
     snapshot.setGranularity(granularity);
     snapshot.setOrgId(orgId);
-    snapshot.setAccountNumber(account);
     snapshot.setBillingAccountId(productCalc.getBillingAccountId());
     snapshot.setBillingProvider(productCalc.getBillingProvider());
 
@@ -228,7 +223,9 @@ public class CombiningRollupSnapshotStrategy {
         calculatedTotals
             .getMeasurements()
             .keySet()
-            .forEach(uom -> seenMeasurements.add(new TallyMeasurementKey(type, uom)));
+            .forEach(
+                metricId ->
+                    seenMeasurements.add(new TallyMeasurementKey(type, metricId.getValue())));
       }
       updateSnapshotWithHardwareMeasurements(snapshot, type, calculatedTotals);
     }
@@ -241,28 +238,21 @@ public class CombiningRollupSnapshotStrategy {
   }
 
   private Granularity calculateNextGranularity(Granularity granularity) {
-    switch (granularity) {
-      case HOURLY:
-        return Granularity.DAILY;
-      case DAILY:
-        return Granularity.WEEKLY;
-      case WEEKLY:
-        return Granularity.MONTHLY;
-      case MONTHLY:
-        return Granularity.YEARLY;
-      case YEARLY:
-        return null;
-      default:
-        throw new IllegalArgumentException(
-            String.format("Unsupported granularity: %s", granularity));
-    }
+    return switch (granularity) {
+      case HOURLY -> Granularity.DAILY;
+      case DAILY -> Granularity.WEEKLY;
+      case WEEKLY -> Granularity.MONTHLY;
+      case MONTHLY -> Granularity.YEARLY;
+      case YEARLY -> null;
+      default ->
+          throw new IllegalArgumentException(String.format(BAD_GRANULARITY_MESSAGE, granularity));
+    };
   }
 
   private TallySnapshotNaturalKey calculateRollupKey(
       Granularity rollupGranularity, TallySnapshot snapshot) {
     TallySnapshotNaturalKey key = new TallySnapshotNaturalKey(snapshot);
-    key.setReferenceDate(
-        clock.calculateStartOfRange(snapshot.getSnapshotDate(), rollupGranularity));
+    key.setReferenceDate(calculateStartOfRange(snapshot.getSnapshotDate(), rollupGranularity));
     key.setGranularity(rollupGranularity);
     return key;
   }
@@ -301,11 +291,7 @@ public class CombiningRollupSnapshotStrategy {
             UsageCalculation productCalc = accountCalc.getCalculation(usageKey);
 
             populateSnapshotFromProductUsageCalculation(
-                snapshot,
-                accountCalc.getAccount(),
-                accountCalc.getOrgId(),
-                productCalc,
-                granularity);
+                snapshot, accountCalc.getOrgId(), productCalc, granularity);
 
             snapshot.setSnapshotDate(offset);
             toSave.add(tallyRepo.save(snapshot));
@@ -422,8 +408,7 @@ public class CombiningRollupSnapshotStrategy {
     reducedMeasurements.forEach(
         (usageKey, measurements) -> {
           OffsetDateTime snapshotDate =
-              clock.calculateStartOfRange(
-                  firstFinestGranularitySnapshot.getSnapshotDate(), granularity);
+              calculateStartOfRange(firstFinestGranularitySnapshot.getSnapshotDate(), granularity);
           var snapshotKey =
               new TallySnapshotNaturalKey(
                   firstFinestGranularitySnapshot.getOrgId(),
@@ -437,7 +422,6 @@ public class CombiningRollupSnapshotStrategy {
           TallySnapshot existing = existingSnapshotLookup.get(snapshotKey);
           TallySnapshot snapshot = Objects.requireNonNullElseGet(existing, TallySnapshot::new);
 
-          snapshot.setAccountNumber(firstFinestGranularitySnapshot.getAccountNumber());
           snapshot.setOrgId(firstFinestGranularitySnapshot.getOrgId());
           snapshot.setProductId(firstFinestGranularitySnapshot.getProductId());
 
@@ -450,11 +434,39 @@ public class CombiningRollupSnapshotStrategy {
           measurements.forEach(
               (measurementKey, value) ->
                   snapshot.setMeasurement(
-                      measurementKey.getMeasurementType(), measurementKey.getUom(), value));
+                      measurementKey.getMeasurementType(),
+                      MetricId.fromString(measurementKey.getMetricId()),
+                      value));
 
           saved.add(tallyRepo.save(snapshot));
         });
 
     return saved;
+  }
+
+  private OffsetDateTime calculateStartOfRange(OffsetDateTime toAdjust, Granularity granularity) {
+    return switch (granularity) {
+      case HOURLY -> clock.startOfHour(toAdjust);
+      case DAILY -> clock.startOfDay(toAdjust);
+      case WEEKLY -> clock.startOfWeek(toAdjust);
+      case MONTHLY -> clock.startOfMonth(toAdjust);
+      case QUARTERLY -> clock.startOfQuarter(toAdjust);
+      case YEARLY -> clock.startOfYear(toAdjust);
+      default ->
+          throw new IllegalArgumentException(String.format(BAD_GRANULARITY_MESSAGE, granularity));
+    };
+  }
+
+  private OffsetDateTime calculateEndOfRange(OffsetDateTime toAdjust, Granularity granularity) {
+    return switch (granularity) {
+      case HOURLY -> clock.endOfHour(toAdjust);
+      case DAILY -> clock.endOfDay(toAdjust);
+      case WEEKLY -> clock.endOfWeek(toAdjust);
+      case MONTHLY -> clock.endOfMonth(toAdjust);
+      case QUARTERLY -> clock.endOfQuarter(toAdjust);
+      case YEARLY -> clock.endOfYear(toAdjust);
+      default ->
+          throw new IllegalArgumentException(String.format(BAD_GRANULARITY_MESSAGE, granularity));
+    };
   }
 }

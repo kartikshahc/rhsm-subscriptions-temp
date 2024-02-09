@@ -20,8 +20,8 @@
  */
 package org.candlepin.subscriptions.db;
 
-import static org.hibernate.jpa.QueryHints.HINT_FETCH_SIZE;
-import static org.hibernate.jpa.QueryHints.HINT_READONLY;
+import static org.hibernate.jpa.AvailableHints.HINT_FETCH_SIZE;
+import static org.hibernate.jpa.AvailableHints.HINT_READ_ONLY;
 
 import jakarta.persistence.QueryHint;
 import java.util.stream.Stream;
@@ -37,17 +37,17 @@ public interface HostTallyBucketRepository extends CrudRepository<HostTallyBucke
   @Query(
       """
           select
-            b.key.productId as productId, h.accountNumber as accountNumber, b.measurementType as measurementType, b.key.usage as usage,
+            b.key.productId as productId, b.measurementType as measurementType, b.key.usage as usage,
             b.key.sla as sla, b.key.billingProvider as billingProvider, b.key.billingAccountId as billingAccountId,
             sum(b.cores) as cores, sum(b.sockets) as sockets, count(h.id) as instances
           from Host h, HostTallyBucket b
             where h = b.host and h.orgId=:orgId and h.instanceType=:instanceType
-          group by b.key.productId, h.accountNumber, b.measurementType, b.key.usage, b.key.sla, b.key.billingProvider, b.key.billingAccountId
+          group by b.key.productId, b.measurementType, b.key.usage, b.key.sla, b.key.billingProvider, b.key.billingAccountId
   """)
   @QueryHints(
       value = {
         @QueryHint(name = HINT_FETCH_SIZE, value = "1024"),
-        @QueryHint(name = HINT_READONLY, value = "true")
+        @QueryHint(name = HINT_READ_ONLY, value = "true")
       })
-  public Stream<AccountBucketTally> tallyHostBuckets(String orgId, String instanceType);
+  Stream<AccountBucketTally> tallyHostBuckets(String orgId, String instanceType);
 }
